@@ -46,6 +46,7 @@ from openhands_desktop.ui.spacing import RADIUS_MD, SPACE_MD, SPACE_SM, SPACE_XS
 
 _RAIL_WIDTH = 64
 _LONG_RUN_WRAP = 80
+_PLAIN_ROW_COLLAPSE_THRESHOLD = 400
 
 
 def _with_soft_wrap_points(text: str) -> str:
@@ -183,16 +184,15 @@ class _StatusPill(QWidget):
 
 
 def _completed_pill() -> QFrame:
-    """The Thinking card's own status treatment -- a full rounded pill with
-    a checkmark, not the plain dot+text _StatusPill tool-call cards use.
-    Colors/layout match thinking-card.svg exactly (2026-07-30 reference)."""
+    """The Thinking card's "done" indicator -- plain text + checkmark, no
+    background/border box (2026-07-31: the pill shape read as an odd empty
+    rectangle to the user, so the box was dropped and just the two labels
+    kept)."""
     pill = QFrame()
     pill.setObjectName("CompletedPill")
-    pill.setStyleSheet(
-        "#CompletedPill { background-color: #0B2E35; border: 1px solid #1D665E; border-radius: 17px; }"
-    )
+    pill.setStyleSheet("#CompletedPill { background: transparent; border: none; }")
     layout = QHBoxLayout(pill)
-    layout.setContentsMargins(14, 6, 12, 6)
+    layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(6)
     text = QLabel("Completed")
     text.setStyleSheet("color: #C9D6E2; font-size: 13px; background: transparent; border: none;")
@@ -431,8 +431,34 @@ class LogView(QScrollArea):
                 header.addWidget(retry_btn)
             layout.addLayout(header)
 
-        body = self._body_label(text, color=(TEXT_MUTED if kind == "system" else TEXT_PRIMARY))
-        layout.addWidget(body)
+        # Long agent/system text (2026-07-31: seen in practice when the model
+        # echoes a raw MCP tool result verbatim into its own answer) floods
+        # the log just like an un-collapsed tool call used to -- same fix:
+        # collapse by default with a one-line preview, click to expand.
+        # user/error stay always-expanded: what you typed and what broke are
+        # both worth seeing without an extra click.
+        if kind in ("agent", "system") and len(text) > _PLAIN_ROW_COLLAPSE_THRESHOLD:
+            preview = text.splitlines()[0][:120]
+            toggle = self._make_toggle()
+            toggle.setText(preview + ("…" if len(text) > len(preview) else ""))
+            toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            toggle.setStyleSheet(
+                f"QToolButton {{ color: {TEXT_MUTED if kind == 'system' else TEXT_PRIMARY}; "
+                "font-size: 13px; background: transparent; border: none; padding: 0px; }}"
+            )
+            layout.addWidget(toggle)
+            body = self._body_label(text, color=(TEXT_MUTED if kind == "system" else TEXT_PRIMARY))
+            body.setVisible(False)
+            layout.addWidget(body)
+            toggle.toggled.connect(
+                lambda checked, b=toggle, w=body: (
+                    b.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow),
+                    w.setVisible(checked),
+                )
+            )
+        else:
+            body = self._body_label(text, color=(TEXT_MUTED if kind == "system" else TEXT_PRIMARY))
+            layout.addWidget(body)
 
         self._add_timeline_row(time_text, border_color, card)
 

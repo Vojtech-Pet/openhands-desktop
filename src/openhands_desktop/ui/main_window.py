@@ -333,6 +333,7 @@ class MainWindow(QMainWindow):
         )
         self._custom_instructions_text = ""
         self._error_history: list[tuple[datetime, str]] = []
+        self._llm_server_state = "unreachable"
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -692,7 +693,14 @@ class MainWindow(QMainWindow):
         status_bar_layout.addWidget(self.model_status_label)
         status_bar_layout.addStretch()
         status_bar_layout.addWidget(self._vsep())
-        self.connection_status_label = QLabel("Disconnected")
+        self.connection_status_label = QPushButton("Disconnected")
+        self.connection_status_label.setFlat(True)
+        self.connection_status_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.connection_status_label.setStyleSheet(
+            "QPushButton { background: transparent; border: none; padding: 0px; text-align: left; }"
+        )
+        self.connection_status_label.setToolTip("Click to try starting LM Studio's server if disconnected")
+        self.connection_status_label.clicked.connect(self._on_connection_status_clicked)
         status_bar_layout.addWidget(self.connection_status_label)
         main_layout.addWidget(status_bar)
 
@@ -708,6 +716,7 @@ class MainWindow(QMainWindow):
         self._model_sync_timer = QTimer(self)
         self._model_sync_timer.setInterval(15000)
         self._model_sync_timer.timeout.connect(self._check_loaded_model)
+        self._model_sync_timer.timeout.connect(self._check_health)
         self._model_sync_timer.start()
 
     @staticmethod
@@ -1403,19 +1412,61 @@ class MainWindow(QMainWindow):
         self.health_icon_label.setPixmap(
             icon("health" if ok else "error", 14).pixmap(14, 14)
         )
+
+        # "Connected" used to mean only "app_server on port 3000 answered" --
+        # confirmed live 2026-07-31 that it stayed green with LM Studio
+        # (port 1234, the actual LLM backend) completely down, since nothing
+        # here ever checked it. probe_llm_server_state() already exists for
+        # exactly this gap (see its own docstring, added after an earlier
+        # instance of the same confusion) -- it just wasn't wired in here
+        # yet. Skipped when app_server itself is down since LM Studio state
+        # is irrelevant at that point.
+        self._llm_server_state = await probe_llm_server_state() if ok else "unreachable"
+        fully_connected = ok and self._llm_server_state == "loaded"
+
         self.overall_status_icon_label.setPixmap(
-            icon("shield-success" if ok else "error", 14).pixmap(14, 14)
+            icon("shield-success" if fully_connected else "error", 14).pixmap(14, 14)
         )
-        self.overall_status_label.setText(
-            "All systems operational" if ok else "Server unreachable"
-        )
-        self.overall_status_label.setObjectName("HealthOk" if ok else "HealthBad")
+        if not ok:
+            overall_text, sublabel_text = "Server unreachable", "Check the server"
+        elif self._llm_server_state == "unreachable":
+            overall_text, sublabel_text = "LM Studio unreachable", "Click Disconnected below to start it"
+        elif self._llm_server_state == "no_model":
+            overall_text, sublabel_text = "No model loaded", "Load a model in LM Studio"
+        else:
+            overall_text, sublabel_text = "All systems operational", "Connected and ready"
+        self.overall_status_label.setText(overall_text)
+        self.overall_status_label.setObjectName("HealthOk" if fully_connected else "HealthBad")
         _repolish(self.overall_status_label)
-        self.overall_status_sublabel.setText("Connected and ready" if ok else "Check the server")
-        self.connection_status_label.setText("Connected" if ok else "Disconnected")
-        self.connection_status_label.setObjectName("HealthOk" if ok else "HealthBad")
+        self.overall_status_sublabel.setText(sublabel_text)
+        self.connection_status_label.setText("Connected" if fully_connected else "Disconnected")
+        self.connection_status_label.setObjectName("HealthOk" if fully_connected else "HealthBad")
         _repolish(self.connection_status_label)
-        self._sync_right_panel(health_ok=ok, connected=ok)
+        self._sync_right_panel(health_ok=ok, connected=fully_connected)
+
+    def _on_connection_status_clicked(self) -> None:
+        if getattr(self, "_llm_server_state", None) == "unreachable":
+            asyncio.ensure_future(self._start_lm_studio_server_async())
+        else:
+            self._check_health()
+
+    async def _start_lm_studio_server_async(self) -> None:
+        self._append_log("Starting LM Studio server (lms server start)…", kind="system")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                str(Path.home() / ".lmstudio" / "bin" / "lms"),
+                "server", "start", "--port", "1234", "--bind", "0.0.0.0",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            output = (await proc.stdout.read()).decode(errors="replace") if proc.stdout else ""
+            await proc.wait()
+        except FileNotFoundError:
+            self._on_error("lms CLI not found at ~/.lmstudio/bin/lms -- is LM Studio installed?")
+            return
+        if proc.returncode != 0:
+            self._on_error(f"Could not start LM Studio server: {output.strip()[:300]}")
+        self._check_health()
 
     def _sync_right_panel(self, *, health_ok: bool | None = None, connected: bool | None = None) -> None:
         if not hasattr(self, "right_panel"):
