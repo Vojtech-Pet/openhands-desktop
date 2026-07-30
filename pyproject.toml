@@ -1,0 +1,24 @@
+[project]
+name = "openhands-desktop"
+version = "0.1.0"
+description = "Native PySide6 desktop client for the OpenHands agent-server"
+requires-python = ">=3.12"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "httpx>=0.28.1",
+    "mcp>=1.2",
+    "pyside6>=6.7",
+    "qasync>=0.28.0",
+    "websockets>=16.1.1",
+]
+
+[project.scripts]
+openhands-desktop = "openhands_desktop.main:main"
+supervised-agent = "openhands_desktop.supervised_agent.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openhands_desktop"]
