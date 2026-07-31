@@ -2,6 +2,10 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-08-01 — Correct host-path-vs-sandbox confusion after the first failure, not the third
+
+- A proper fix would validate path scope in the tool's own JSON schema before the call ever reaches the sandbox, but glob/grep/file_editor are stock OpenHands SDK tools, not something this app can patch. Instead, the app now watches every failed glob/grep/file_editor observation client-side: if the error says "not a valid directory" and contains a host-looking path prefix, it queues a targeted correction after the very first occurrence -- faster than relying on the generic 3-strikes repeat detector to eventually catch the same pattern.
+
 ## 2026-08-01 — Always auto-scroll; notify on STUCK; fix glob-vs-host-path confusion
 
 - Log view now always follows new content to the bottom (reversing the previous "only if already at bottom" behavior), across new rows, an expanded Working card, and a growing reasoning row.
