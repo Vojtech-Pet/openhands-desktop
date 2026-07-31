@@ -2,6 +2,11 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-08-01 — Fixed garbled reasoning text; Agent rows changed from green to purple
+
+- Each streaming reasoning chunk was being `.strip()`'d before appending -- confirmed live the leading/trailing space of a chunk is often the real word-separator once concatenated ("Teraz sa" rendering as "Terazsa"). Fixed.
+- Agent-styled rows (now used for reasoning/narration too, not just final replies) were green, which reads as "completed" elsewhere in the app -- changed to purple.
+
 ## 2026-08-01 — Reasoning/thinking is its own visible row again, not folded into Working
 
 - Reversal of the "fold thinking into the collapsed Working card" design from the day before: confirmed live via screenshot that the model's reasoning channel is where the app's own narration instructions ("Looking for X", "Found it: Y") actually land, so collapsing it made exactly that narration easy to miss. Reasoning now renders as its own always-visible row, styled like an agent reply, growing in place as it streams. Tool calls/results and system notices still fold into Working as before -- only "thinking" moved.
