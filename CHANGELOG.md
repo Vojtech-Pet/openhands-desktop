@@ -2,6 +2,10 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-07-31 — Fixed Plan getting stuck trying to delegate (it has no launch_subagent tool)
+
+- The mandatory the local project project delegation instruction had been added to the shared base suffix, which Plan also receives -- Plan has no `launch_subagent` tool at all (confirmed live), so it got stuck searching the filesystem trying to "find" the subagent and hit the STUCK detector. Moved the delegation instruction into Code-only instructions; Plan now knows it doesn't have delegation and writes "Code must delegate to project-module-engineer" into PLAN.md instead.
+
 ## 2026-07-31 — Second independent window; mandatory sub-agent delegation for LocalProject work
 
 - New "New window" action (composer's "⋯" menu): opens a second, fully independent window sharing this process's client/MCP servers, so you can keep working (or just watch) while the first window's conversation is busy. Shutdown is now aware of how many windows are open -- only the last one closing actually tears down the shared servers and checks whether it's safe to unload the model.
