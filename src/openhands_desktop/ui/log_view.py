@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from PySide6.QtCore import QPointF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPixmap
+from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -212,14 +212,16 @@ class LogView(QScrollArea):
         # before the first one's observation comes back).
         self._pending_tool: dict | None = None
 
-        # The still-open Thinking card for the current reasoning burst.
-        # Reasoning streams in as many small StreamingDeltaEvent batches
-        # (~1 every 40ms, see event_batcher.py) -- each is only the new
-        # chunk since the last one, not the full text so far. Without this,
-        # every batch would open its own brand-new Thinking card instead of
-        # one card growing in place, which is what actually looks like
-        # "every word gets its own card" during a long reasoning burst.
-        self._pending_thinking: dict | None = None
+        # The still-open, always-visible row for the current reasoning
+        # burst (rendered like an agent reply -- see append_entry's
+        # "thinking" branch for why). Reasoning streams in as many small
+        # StreamingDeltaEvent batches (~1 every 40ms, see event_batcher.py)
+        # -- each is only the new chunk since the last one, not the full
+        # text so far. Without this, every batch would open its own
+        # brand-new row instead of one row growing in place, which is what
+        # actually looks like "every word gets its own row" during a long
+        # reasoning burst.
+        self._pending_thinking_row: dict | None = None
 
         # 2026-07-31: thinking + tool_call/tool_result no longer get their
         # own top-level timeline rows -- they're the noise a user doesn't
@@ -261,9 +263,9 @@ class LogView(QScrollArea):
 
         if kind != "thinking":
             # Any other event ends the current reasoning burst -- the next
-            # "thinking" after this starts a fresh card instead of resuming
+            # "thinking" after this starts a fresh row instead of resuming
             # a stale one from a previous turn.
-            self._pending_thinking = None
+            self._pending_thinking_row = None
 
         if kind == "tool_result" and self._pending_tool is not None:
             self._resolve_pending_tool("success", text, meta)
@@ -275,24 +277,27 @@ class LogView(QScrollArea):
         if kind == "tool_call":
             self._group_new_tool_call(text, time_text, code=code)
         elif kind == "thinking":
-            if self._pending_thinking is not None:
-                self._append_thinking_chunk(text)
-            else:
-                self._group_new_thinking(text, time_text)
+            # 2026-08-01 reversal: this model's "thinking"/reasoning channel
+            # is where it actually puts user-facing narration ("Looking for
+            # X", "Found it: Y") per the app's own system-prompt
+            # instructions -- confirmed live via screenshot that folding it
+            # into the collapsed Working card (the 2026-07-31 design) made
+            # exactly that narration easy to miss, the opposite of the
+            # point of adding it. Now rendered as its own always-visible
+            # row, styled like an agent reply, growing in place as more
+            # reasoning streams in instead of one new row per chunk.
+            self._append_thinking_as_agent_row(text, time_text)
         elif kind in ("user", "agent", "error"):
             # What was asked, the real answer, and a genuine error (LLM/infra
             # failures like a context-size overflow -- actionable, worth
             # seeing immediately) all get their own always-visible row.
-            # Everything else (thinking, tool calls, system notices, and the
-            # benign "not a valid directory" probe remapped to "system"
-            # above) folds into the collapsed Working group instead, per
-            # 2026-07-31 request: "jedine čo sa má mať nové políčko je
-            # otázka a odpoveď" -- refined the same day to keep real errors
-            # separate after a real context-size error showed up folded in
-            # and easy to miss.
+            # Tool calls, system notices, and the benign "not a valid
+            # directory" probe remapped to "system" above still fold into
+            # the collapsed Working group.
             if self._active_group is not None:
                 self._finalize_group(self._active_group)
             self._active_group = None
+            self._pending_thinking_row = None
             self._new_plain_row(kind, text, time_text)
         else:
             # "system" notices (workspace confirmations, raw MCP tool
@@ -316,7 +321,7 @@ class LogView(QScrollArea):
     def clear(self) -> None:
         self._entries.clear()
         self._pending_tool = None
-        self._pending_thinking = None
+        self._pending_thinking_row = None
         self._active_group = None
         while self._layout.count() > 1:  # keep the trailing stretch
             item = self._layout.takeAt(0)
@@ -588,42 +593,6 @@ class LogView(QScrollArea):
         elapsed = (datetime.now() - group["start_time"]).total_seconds()
         group["elapsed_label"].setText(f"{elapsed:.1f} s")
 
-    def _tail_lines(self, label: QLabel, text: str, max_lines: int = 2) -> str:
-        """Greedy word-wrap the *whole* text at the label's actual width,
-        then keep only the last `max_lines` -- a real previous-line +
-        current-line pair that scrolls up as new text arrives, not just a
-        fixed character count reflowed by Qt's own word wrap (which doesn't
-        add an ellipsis when it clips past the box, and doesn't line up
-        with "one more line underneath the current one")."""
-        metrics = QFontMetrics(label.font())
-        width = max(label.width(), 300)
-        words = " ".join(text.strip().split()).split(" ")
-        lines: list[str] = []
-        current = ""
-        for word in words:
-            candidate = f"{current} {word}".strip()
-            if metrics.horizontalAdvance(candidate) <= width or not current:
-                current = candidate
-            else:
-                lines.append(current)
-                current = word
-        if current:
-            lines.append(current)
-        tail = lines[-max_lines:]
-        if len(lines) > max_lines and tail:
-            tail[0] = "…" + tail[0]
-        return "\n".join(tail)
-
-    def _update_group_preview(self, group: dict, text: str) -> None:
-        # "Current/last part of the reasoning" -- the tail of the text, not
-        # the start, is what's actually still relevant while it's still
-        # streaming (borrowed from LM Studio's collapsed-reasoning preview).
-        label = group["preview_label"]
-        snippet = self._tail_lines(label, text, max_lines=2)
-        label.setText(snippet)
-        if not group["toggle"].isChecked():
-            label.setVisible(bool(snippet))
-
     def _finalize_group(self, group: dict) -> None:
         """Called right before a group is closed (a new user/agent/error row
         is about to start) -- freezes the elapsed timer and flips the
@@ -671,36 +640,45 @@ class LogView(QScrollArea):
             f"color: {color}; font-weight: 700; font-size: 13px; background: transparent;"
         )
 
-    def _group_new_thinking(self, text: str, time_text: str) -> None:
-        group = self._ensure_activity_group(time_text)
-        self._set_group_status(group, "Thinking…")
-        frame, layout = self._group_sub_card(COLOR_THINKING_BORDER)
+    def _append_thinking_as_agent_row(self, text: str, time_text: str) -> None:
+        """Reasoning streams in as many small StreamingDeltaEvent batches
+        (~1 every 40ms) -- grows the SAME row in place rather than opening a
+        new one per chunk, same reasoning as the old group-based version
+        this replaced."""
+        if self._pending_thinking_row is not None:
+            pending = self._pending_thinking_row
+            combined = pending["text"] + text
+            pending["text"] = combined
+            pending["body"].setProperty("raw_text", combined)
+            pending["body"].setText(_with_soft_wrap_points(combined))
+            self._plain_row_content_grew()
+            return
+        border_color, header_label, header_color = _CARD_STYLE["agent"]
+        card, layout = self._new_card(border_color)
         header = self._header_row()
-        icon_label = QLabel()
-        icon_label.setPixmap(thinking_icon(14).pixmap(14, 14))
-        header.addWidget(icon_label)
-        name = QLabel("Thinking")
-        name.setStyleSheet(
-            f"color: {COLOR_THINKING_ACCENT}; font-weight: 700; font-size: 12px; background: transparent;"
-        )
+        avatar = QLabel()
+        avatar.setPixmap(tile_icon("terminal", 22).pixmap(22, 22))
+        header.addWidget(avatar)
+        name = QLabel(header_label)
+        name.setStyleSheet(f"color: {header_color}; font-weight: 700; font-size: 13px; background: transparent;")
         header.addWidget(name)
         header.addStretch(1)
         layout.addLayout(header)
-        body = self._body_label(text, color=COLOR_THINKING_TEXT)
+        body = self._body_label(text, color=TEXT_PRIMARY)
         layout.addWidget(body)
-        group["body_layout"].addWidget(frame)
-        self._pending_thinking = {"body": body, "text": text, "group": group}
-        self._update_group_preview(group, text)
-        self._group_content_added(group)
+        self._add_timeline_row(time_text, border_color, card)
+        self._pending_thinking_row = {"body": body, "text": text}
 
-    def _append_thinking_chunk(self, text: str) -> None:
-        pending = self._pending_thinking
-        combined = pending["text"] + text
-        pending["text"] = combined
-        pending["body"].setProperty("raw_text", combined)
-        pending["body"].setText(_with_soft_wrap_points(combined))
-        self._update_group_preview(pending["group"], combined)
-        self._group_content_added(pending["group"])
+    def _plain_row_content_grew(self) -> None:
+        """_add_timeline_row's was-at-bottom/scroll logic only runs when a
+        new row is inserted -- growing an existing row's text (streaming
+        reasoning into the same bubble) doesn't change the row count, so it
+        needs the same "only follow if already at the edge" re-check
+        _group_content_added does for the collapsed-card case."""
+        bar = self.verticalScrollBar()
+        was_at_bottom = bar.value() >= bar.maximum() - self._AT_BOTTOM_TOLERANCE_PX
+        if was_at_bottom:
+            self._scroll_to_bottom()
 
     def _group_new_tool_call(self, tool_name: str, time_text: str, *, code: str | None = None) -> None:
         group = self._ensure_activity_group(time_text)
