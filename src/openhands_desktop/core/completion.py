@@ -4,8 +4,8 @@ finished".
 Found 2026-07-27: a Plan-mode run's `execution_status` went to "finished"
 after ~30 minutes without ever writing real plan content -- the model's
 final turn was plain text with no tool call and no explicit `finish` action,
-and the framework treated the text-only turn as done anyway (see
-local-project/.openhands/hooks/stop_syntax_check.sh for the server-side
+and the framework treated the text-only turn as done anyway (see that
+project's .openhands/hooks/stop_syntax_check.sh for the server-side
 mitigation used there). A desktop client has no equivalent stop-hook to lean
 on, so it must make this judgment itself from the event stream: only trust
 "finished" once a genuine ActionEvent with tool_name == "finish" has been
