@@ -22,6 +22,8 @@ uv run python3 -m openhands_desktop.main
 
 Requires a running OpenHands app-server (`uvicorn openhands.app_server.app:app`) reachable at `http://127.0.0.1:3000` by default.
 
+See [CHANGELOG.md](CHANGELOG.md) for a list of fixes and changes.
+
 ## Supervised agent CLI
 
 ```bash
