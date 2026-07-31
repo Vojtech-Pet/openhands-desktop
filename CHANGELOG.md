@@ -2,6 +2,12 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-08-01 — Always auto-scroll; notify on STUCK; fix glob-vs-host-path confusion
+
+- Log view now always follows new content to the bottom (reversing the previous "only if already at bottom" behavior), across new rows, an expanded Working card, and a growing reasoning row.
+- Auto-supervise's STUCK event appended a visible row but never actually notified anyone -- confirmed live a conversation sat paused for hours with zero visible sign. Now flashes/raises the window like a real error.
+- Root-caused a real stuck loop: the agent correctly used `workspace_list_folder` on a host path the user gave it, then later switched to plain `glob` on that same host path (which only sees `/workspace/project`), got "not a valid directory" every time, and looped until stopped. Added an explicit instruction distinguishing host-path tools from sandbox-only tools.
+
 ## 2026-08-01 — Fixed garbled reasoning text; Agent rows changed from green to purple
 
 - Each streaming reasoning chunk was being `.strip()`'d before appending -- confirmed live the leading/trailing space of a chunk is often the real word-separator once concatenated ("Teraz sa" rendering as "Terazsa"). Fixed.
