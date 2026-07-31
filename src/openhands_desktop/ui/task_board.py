@@ -99,6 +99,10 @@ def _show_task_menu(anchor: QWidget, conversation_id: str, on_delete) -> None:
 
 class TaskBoardDialog(QDialog):
     open_requested = Signal(str)  # conversation_id
+    conversations_deleted = Signal(list)  # list[str] of conversation_id -- lets
+    # MainWindow notice and reset itself if the conversation it's currently
+    # showing (log, Errors count, status pill) was deleted from here instead
+    # of from its own sidebar -- this dialog has no other way to tell it.
 
     def __init__(self, parent: QWidget | None, client: AppServerClient) -> None:
         super().__init__(parent)
@@ -117,6 +121,7 @@ class TaskBoardDialog(QDialog):
         )
 
         self._conversations: list[AppConversation] = []
+        self._deleting_all_ids: list[str] = []
 
         layout = QVBoxLayout(self)
         header_row = QHBoxLayout()
@@ -183,11 +188,11 @@ class TaskBoardDialog(QDialog):
             run_async(
                 self,
                 self._delete_family(conversation_id),
-                lambda _result: self._reload(),
+                self._on_delete_family_done,
                 error_title="Failed to delete conversation",
             )
 
-    async def _delete_family(self, conversation_id: str) -> None:
+    async def _delete_family(self, conversation_id: str) -> set[str]:
         # A Continue-as-Code parent/child pair shares one sandbox
         # container server-side, which is only torn down once EVERY
         # conversation referencing it is deleted -- deleting just the one
@@ -203,6 +208,11 @@ class TaskBoardDialog(QDialog):
                 await self._client.delete_conversation(family_id)
             except Exception:  # noqa: BLE001 -- keep deleting the rest of the family
                 pass
+        return family_ids
+
+    def _on_delete_family_done(self, family_ids: set[str]) -> None:
+        self._reload()
+        self.conversations_deleted.emit(list(family_ids))
 
     def _confirm_delete_all(self) -> None:
         count = len(self._conversations)
@@ -223,6 +233,7 @@ class TaskBoardDialog(QDialog):
             # a slow bulk delete looked exactly like nothing had happened.
             self._list.clear()
             self._list.addItem(QListWidgetItem(f"Deleting {count} conversation(s)… waiting"))
+            self._deleting_all_ids = [c.id for c in self._conversations]
             run_async(
                 self,
                 self._delete_all(),
@@ -244,6 +255,7 @@ class TaskBoardDialog(QDialog):
     def _on_delete_all_done(self, result: tuple[int, int]) -> None:
         deleted, failed = result
         self._reload()
+        self.conversations_deleted.emit(self._deleting_all_ids)
         if failed:
             QMessageBox.warning(
                 self,

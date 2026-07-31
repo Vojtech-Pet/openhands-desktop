@@ -1025,7 +1025,25 @@ class MainWindow(QMainWindow):
     def _open_task_board(self) -> None:
         dialog = TaskBoardDialog(self, self._client)
         dialog.open_requested.connect(self._resume_conversation)
+        dialog.conversations_deleted.connect(self._on_conversations_deleted_elsewhere)
         dialog.exec()
+
+    def _on_conversations_deleted_elsewhere(self, deleted_ids: list[str]) -> None:
+        # Mission Control has no other way to tell this window that the
+        # conversation it's currently showing (log, Errors count, status
+        # pill) was just deleted from there instead of from the sidebar --
+        # without this, deleting it via Mission Control left this window
+        # showing a stale log/error count for a conversation that no
+        # longer exists server-side at all.
+        current_id = self._controller.conversation_id if self._controller is not None else None
+        if current_id is not None and current_id in deleted_ids:
+            self._start_fresh_conversation()
+        asyncio.ensure_future(self._drop_deleted_history_and_refresh(deleted_ids))
+
+    async def _drop_deleted_history_and_refresh(self, deleted_ids: list[str]) -> None:
+        for deleted_id in deleted_ids:
+            await self._history.delete(deleted_id)
+        await self._refresh_sidebar_history_async()
 
     def _save_to_mempalace(self) -> None:
         if self._controller is None or self._controller.conversation_id is None:
