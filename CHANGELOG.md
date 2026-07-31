@@ -5,7 +5,7 @@ Notable fixes and changes, newest first.
 ## 2026-07-31 — Continue-as-Code status/sidebar fixes, family-aware delete, live LLM toggle push
 
 - `search_conversations()` was missing `include_sub_conversations=true` -- Continue-as-Code children were completely invisible to Mission Control and to the "is anything else running" safety check used before unloading the model.
-- Deleting a conversation now resolves and deletes its whole Plan/Code family (parent + sub-conversations), not just the one id clicked -- a Continue-as-Code pair shares one sandbox container server-side, which the server only tears down once every conversation referencing it is gone.
+- Deleting a conversation now resolves and deletes its whole Plan/Code family (parent + sub-conversations), not just the one id clicked -- a Continue-as-Code pair shares one sandbox container server-side, which the server only tears down once every conversation referencing it is gone (confirmed directly in OpenHands' own `app_conversation_router.py`, `_finalize_sandbox_delete`: "delete the sandbox if unreferenced"). Applies to both the sidebar's per-conversation delete and Mission Control's per-task/"Delete all" actions.
 - Continue-as-Code swaps the Plan sidebar entry's id in place instead of inserting a second row for the same task; the old Plan controller is disconnected before the model-switch wait instead of after, so its status polling can't overwrite a fresh "running" write.
 - Sidebar status writes are now serialized so out-of-order DB writes can't leave a stale status on screen.
 - New "Continued as Code" status (from the server's own `sub_conversation_ids`) replaces a misleading plain "Finished" after reattaching to an already-continued Plan conversation.
