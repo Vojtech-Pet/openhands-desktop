@@ -9,13 +9,15 @@ GET /api/v1/app-conversations/search endpoint.
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -50,7 +52,7 @@ _STATUS_COLOR = {
 }
 
 
-def _status_row(conversation: AppConversation) -> QWidget:
+def _status_row(conversation: AppConversation, on_delete) -> QWidget:
     row = QWidget()
     row.setObjectName("TaskRow")
     color = _STATUS_COLOR.get(conversation.execution_status, TEXT_MUTED)
@@ -78,7 +80,21 @@ def _status_row(conversation: AppConversation) -> QWidget:
     status_label.setStyleSheet(f"color: {color}; font-size: 12.5px; font-weight: 600;")
     layout.addWidget(status_label)
 
+    more_btn = QPushButton("⋯")
+    more_btn.setFixedSize(20, 20)
+    more_btn.setToolTip("Task actions")
+    more_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    more_btn.clicked.connect(lambda: _show_task_menu(more_btn, conversation.id, on_delete))
+    layout.addWidget(more_btn)
+
     return row
+
+
+def _show_task_menu(anchor: QWidget, conversation_id: str, on_delete) -> None:
+    menu = QMenu(anchor)
+    delete_action = menu.addAction("Delete conversation")
+    delete_action.triggered.connect(lambda: on_delete(conversation_id))
+    menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
 
 
 class TaskBoardDialog(QDialog):
@@ -135,12 +151,29 @@ class TaskBoardDialog(QDialog):
         for conversation in conversations:
             item = QListWidgetItem()
             item.setData(1000, conversation.id)
-            item.setSizeHint(_status_row(conversation).sizeHint())
+            row = _status_row(conversation, self._confirm_delete_task)
+            item.setSizeHint(row.sizeHint())
             self._list.addItem(item)
-            self._list.setItemWidget(item, _status_row(conversation))
+            self._list.setItemWidget(item, row)
 
     def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
         conversation_id = item.data(1000)
         if conversation_id:
             self.open_requested.emit(conversation_id)
             self.accept()
+
+    def _confirm_delete_task(self, conversation_id: str) -> None:
+        reply = QMessageBox.question(
+            self,
+            "Delete conversation",
+            "Delete this conversation? This can't be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            run_async(
+                self,
+                self._client.delete_conversation(conversation_id),
+                lambda _result: self._reload(),
+                error_title="Failed to delete conversation",
+            )

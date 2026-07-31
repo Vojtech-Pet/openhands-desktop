@@ -35,7 +35,8 @@ class PendingQuestion:
     question: str
     options: list[str]
     allow_free_text: bool
-    future: asyncio.Future = field(repr=False)
+    multi_select: bool = False
+    future: asyncio.Future = field(repr=False, default=None)  # type: ignore[assignment]
 
 
 class AskUserServer:
@@ -77,11 +78,15 @@ class AskUserServer:
                 "Use when a decision is the user's to make (which approach to take, "
                 "which file is authoritative, whether to proceed with something "
                 "irreversible) -- not for things you can determine yourself. "
-                "Provide 2-4 short, mutually exclusive options. Returns the option "
-                "the user picked, or their own typed answer."
+                "Provide 2-4 short options. Set multi_select=True if more than one "
+                "option can apply at once (shown as checkboxes instead of buttons); "
+                "the answer is then a comma-separated list of the checked options. "
+                "Returns the option(s) the user picked, or their own typed answer."
             ),
         )
-        async def ask_user_question(question: str, options: list[str]) -> str:
+        async def ask_user_question(
+            question: str, options: list[str], multi_select: bool = False
+        ) -> str:
             if not question.strip():
                 return "ERROR: question must not be empty."
             loop = asyncio.get_running_loop()
@@ -90,6 +95,7 @@ class AskUserServer:
                 question=question.strip(),
                 options=[o for o in (opt.strip() for opt in options) if o][:4],
                 allow_free_text=True,
+                multi_select=multi_select,
                 future=future,
             )
             try:

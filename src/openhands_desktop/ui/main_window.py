@@ -1763,6 +1763,14 @@ class MainWindow(QMainWindow):
         self._real_context_window = 0
         self._auto_compact_triggered = False
         self._update_tool_call_label()
+        # Without this, the status pill keeps showing the parent conversation's
+        # terminal state ("Finished (unverified)") until the new conversation's
+        # own first state_changed event arrives -- which looks exactly like the
+        # new conversation is stuck, even while it's actively running.
+        self.state_label.setText("Starting…")
+        self.state_label.setObjectName("")
+        self.state_label.setToolTip("")
+        _repolish(self.state_label)
         self._new_controller()
         self.log.clear()
         self.stack.setCurrentWidget(self.log)
@@ -1950,7 +1958,7 @@ class MainWindow(QMainWindow):
         loop. show() keeps it serving while the question is on screen.
         """
         self._append_log(pending.question, kind="agent")
-        dialog = AskUserDialog(self, pending.question, pending.options)
+        dialog = AskUserDialog(self, pending.question, pending.options, pending.multi_select)
 
         def _resolve() -> None:
             if pending.future.done():
@@ -2214,6 +2222,9 @@ class MainWindow(QMainWindow):
 
     async def _shutdown_before_close(self) -> None:
         try:
+            closing_conversation_id = (
+                self._controller.conversation_id if self._controller is not None else None
+            )
             if self._controller is not None:
                 await self._controller.stop()
             # Unregister BEFORE closing the client -- it needs a live
@@ -2223,18 +2234,30 @@ class MainWindow(QMainWindow):
             await self._ask_user_server.stop()
             await self._unregister_workspace_mcp()
             await self._workspace_server.stop()
-            await self._client.aclose()
+            other_conversations_running = False
             try:
-                process = await asyncio.create_subprocess_exec(
-                    "/home/vojtech/.lmstudio/bin/lms",
-                    "unload",
-                    "--all",
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
+                conversations = await self._client.search_conversations(limit=50)
+                other_conversations_running = any(
+                    c.execution_status is not None
+                    and c.execution_status.value == "running"
+                    and c.id != closing_conversation_id
+                    for c in conversations
                 )
-                await asyncio.wait_for(process.wait(), timeout=30.0)
-            except (OSError, asyncio.TimeoutError):
-                pass
+            except Exception:  # noqa: BLE001 -- best effort; unload only if we can confirm nothing else needs the model
+                other_conversations_running = True
+            await self._client.aclose()
+            if not other_conversations_running:
+                try:
+                    process = await asyncio.create_subprocess_exec(
+                        "/home/vojtech/.lmstudio/bin/lms",
+                        "unload",
+                        "--all",
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    await asyncio.wait_for(process.wait(), timeout=30.0)
+                except (OSError, asyncio.TimeoutError):
+                    pass
         finally:
             self._shutdown_complete = True
             self.close()
