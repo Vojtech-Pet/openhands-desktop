@@ -2938,7 +2938,15 @@ class MainWindow(QMainWindow):
 
     def _render_event(self, event: NormalizedEvent) -> None:
         if event.kind == EventKind.STREAMING_DELTA:
-            reasoning = (event.raw.get("reasoning_content") or "").strip()
+            # NOT .strip()'d: each delta is a small raw chunk of the
+            # streaming reasoning text, and the leading/trailing space of a
+            # chunk is often the actual word-separator between it and its
+            # neighbor once concatenated (LogView appends chunks directly
+            # in place -- see _append_thinking_as_agent_row). Stripping
+            # each chunk individually was silently eating exactly those
+            # separators, gluing words together ("Teraz sa" -> "Terazsa")
+            # -- confirmed live via a real garbled render.
+            reasoning = event.raw.get("reasoning_content") or ""
             if reasoning:
                 self._append_log(
                     reasoning, kind="thinking", collapsed=True, title="Thinking",

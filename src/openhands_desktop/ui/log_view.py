@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 from openhands_desktop.ui.icons import thinking_icon, tile_icon, tool_accent_color, tool_call_icon
 from openhands_desktop.ui.palette import (
     BORDER,
+    COLOR_ACCENT,
     COLOR_DANGER,
     COLOR_PRIMARY,
     COLOR_SUCCESS,
@@ -113,7 +114,11 @@ def _check_circle_pixmap(size: int = 16, color: str = "#23C995") -> QPixmap:
 # kind -> (card border color, header label, header text color)
 _CARD_STYLE = {
     "user": (BORDER, "You", TEXT_PRIMARY),
-    "agent": (COLOR_SUCCESS, "Agent", TEXT_PRIMARY),
+    # Purple ("AI model/agentic" in the palette), not green -- green reads
+    # as "success/completed" elsewhere in this app, and now that thinking
+    # text also renders in an "agent"-styled row, that association would be
+    # actively misleading for a mid-task reasoning burst that isn't done.
+    "agent": (COLOR_ACCENT, "Agent", TEXT_PRIMARY),
     "error": (COLOR_DANGER, "Error", COLOR_DANGER),
     "system": (BORDER, None, TEXT_MUTED),
 }
