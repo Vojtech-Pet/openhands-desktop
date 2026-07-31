@@ -366,6 +366,7 @@ class MainWindow(QMainWindow):
         self._stuck_prompt_shown_for_run = False
         self._last_run_state: RunState | None = None
         self._last_event_at: datetime | None = None
+        self._state_generation = 0
         self._tool_call_count = 0
         self._estimated_context_chars = 0
         self._real_used_tokens = 0
@@ -2149,11 +2150,47 @@ class MainWindow(QMainWindow):
         text = f"{hours}h {minutes}m {seconds}s" if hours else f"{minutes}m {seconds}s"
         self.duration_label.setText(text)
 
+    def _recheck_state_after_grace(self, raw_state: RunState, generation: int) -> None:
+        # generation guards against a real state_changed (override or not)
+        # having already landed since this was scheduled -- without it, a
+        # long quiet stretch inside a conversation that later became
+        # genuinely, normally RUNNING (a real emission, not an override)
+        # could wrongly get yanked back down to this timer's stale captured
+        # raw_state (e.g. an old ERROR/Waiting from many minutes earlier).
+        if generation != self._state_generation:
+            return
+        if self._controller is None or self._last_run_state != RunState.RUNNING:
+            return  # a real state_changed already landed and moved things on
+        if self._last_event_at is not None:
+            elapsed = (datetime.now() - self._last_event_at).total_seconds()
+            if elapsed < _RECENT_ACTIVITY_GRACE_S:
+                return  # newer activity arrived; its own override already rescheduled this
+        self._on_state_changed(raw_state)
+
     def _on_state_changed(self, state: RunState) -> None:
+        self._state_generation += 1
+        generation = self._state_generation
+        raw_state = state
         if state in (RunState.ERROR, RunState.FINISHED_UNVERIFIED) and self._last_event_at is not None:
             elapsed = (datetime.now() - self._last_event_at).total_seconds()
             if elapsed < _RECENT_ACTIVITY_GRACE_S:
                 state = RunState.RUNNING
+                # ConversationController._poll_status only emits
+                # state_changed when the RESOLVED state actually changes
+                # from what it last saw -- it has no idea this override
+                # happened here, purely in the view layer. If the
+                # conversation has genuinely finished (nothing more ever
+                # arrives), that resolved value never changes again, so
+                # the controller never emits again either, and without
+                # this timer the override above would show "Running…"
+                # forever with no way to ever correct itself (confirmed
+                # live 2026-07-31: stuck at "Running… 14m 27s" long after
+                # the agent's actual completion message). Re-evaluate for
+                # real once the grace window has actually elapsed.
+                remaining_ms = int((_RECENT_ACTIVITY_GRACE_S - elapsed) * 1000) + 500
+                QTimer.singleShot(
+                    remaining_ms, lambda: self._recheck_state_after_grace(raw_state, generation)
+                )
         self._last_run_state = state
         if state == RunState.ERROR:
             self._notify_needs_attention()
