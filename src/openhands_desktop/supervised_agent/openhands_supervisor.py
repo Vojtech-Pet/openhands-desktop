@@ -105,6 +105,7 @@ class ConversationWatchdog:
         self._progress_history: list[int] = []
         self._nudges_used = 0
         self._action_count = 0
+        self._steps_since_progress_check = 0
         self._stopped = False
 
     @property
@@ -133,19 +134,52 @@ class ConversationWatchdog:
                 if event.tool_name == "finish":
                     continue
                 self._action_count += 1
-                if self._action_count > MAX_AGENT_STEPS:
-                    self._stopped = True
-                    self._controller.interrupt()
-                    self._emit(
-                        {"kind": "stuck", "reason": f"Dosiahnutý limit {MAX_AGENT_STEPS} krokov."}
-                    )
-                    return
+                self._steps_since_progress_check += 1
 
                 tool_name = event.tool_name or "?"
                 arguments = normalize_arguments(tool_name, _extract_arguments(event.raw))
                 fingerprint = call_hash(tool_name, arguments)
                 count = self._tool_call_counts.get(fingerprint, 0) + 1
                 self._tool_call_counts[fingerprint] = count
+
+                if self._steps_since_progress_check > MAX_AGENT_STEPS:
+                    # Confirmed live 2026-07-31: a genuinely productive run
+                    # (30 different file reads/greps while researching an
+                    # existing codebase, no repeats) got cut off here just
+                    # for being long, not for being stuck -- the exact thing
+                    # this watchdog exists to *distinguish*, not conflate.
+                    # Recent progress_history (same signal the no-progress
+                    # stuck check already uses) says whether the last
+                    # NO_PROGRESS_WINDOW steps actually went somewhere; if
+                    # so, this is a real long task, not a loop -- give it
+                    # another MAX_AGENT_STEPS instead of stopping.
+                    recent = self._progress_history[-NO_PROGRESS_WINDOW:]
+                    if recent and sum(recent) > 0:
+                        self._steps_since_progress_check = 0
+                        # A long, fully-collapsed Working card with no
+                        # visible sign of life at the 30-step mark reads as
+                        # "stuck" even when it's genuinely still working --
+                        # surface that it's continuing, not silently extend
+                        # the budget with nothing shown for it.
+                        self._emit(
+                            {
+                                "kind": "progress",
+                                "steps": self._action_count,
+                            }
+                        )
+                    else:
+                        self._stopped = True
+                        self._controller.interrupt()
+                        self._emit(
+                            {
+                                "kind": "stuck",
+                                "reason": (
+                                    f"Dosiahnutý limit {MAX_AGENT_STEPS} krokov bez "
+                                    "preukázateľného pokroku."
+                                ),
+                            }
+                        )
+                        return
 
                 self._emit({"kind": "action", "tool": tool_name, "arguments": arguments, "repeat_count": count})
 

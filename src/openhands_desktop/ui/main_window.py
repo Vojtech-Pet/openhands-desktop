@@ -1968,6 +1968,12 @@ class MainWindow(QMainWindow):
             )
         elif kind == "stuck":
             self._append_log(f"[Auto-supervise: stopped -- {event.get('reason')}]", kind="system")
+        elif kind == "progress":
+            # Updates the Working card's own visible header (see
+            # LogView.note_progress) rather than adding a hidden note --
+            # this needs to be seen without expanding anything, which is
+            # the whole point.
+            self.log.note_progress(f"Still working… ({event.get('steps')} steps, making progress)")
 
     _NUDGE_TEXT = (
         "You seem to be stuck repeating the same searches or reasoning without making "

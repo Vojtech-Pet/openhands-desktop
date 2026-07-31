@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from PySide6.QtCore import QPointF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPixmap
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -288,6 +288,8 @@ class LogView(QScrollArea):
             # otázka a odpoveď" -- refined the same day to keep real errors
             # separate after a real context-size error showed up folded in
             # and easy to miss.
+            if self._active_group is not None:
+                self._finalize_group(self._active_group)
             self._active_group = None
             self._new_plain_row(kind, text, time_text)
         else:
@@ -298,6 +300,16 @@ class LogView(QScrollArea):
             # into the group same as everything else.
             note = text if kind == "system" else f"{label_prefix}: {text}"
             self._group_new_note(note, time_text)
+
+    def note_progress(self, text: str) -> None:
+        """Updates the current Working card's header text -- the one part
+        of it visible even while collapsed -- instead of adding a folded-in
+        note nobody sees without expanding. For a long, fully-collapsed
+        research stretch (2026-07-31: 30 read-only steps with no repeats,
+        genuinely progressing) that would otherwise look completely
+        stalled from the outside."""
+        if self._active_group is not None:
+            self._set_group_status(self._active_group, text)
 
     def clear(self) -> None:
         self._entries.clear()
@@ -507,10 +519,27 @@ class LogView(QScrollArea):
         )
         header.addWidget(status_label)
         header.addStretch(1)
+        elapsed_label = QLabel("0.0 s")
+        elapsed_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px; background: transparent;")
+        header.addWidget(elapsed_label)
         toggle = self._make_toggle()
         toggle.setToolTip("Show thinking and tool calls for this turn")
         header.addWidget(toggle)
         layout.addLayout(header)
+
+        # Live 1-2 line preview of the current reasoning text, visible even
+        # while the card is collapsed (borrowed from LM Studio's own
+        # collapsed-reasoning preview) -- without it, a long thinking burst
+        # behind a collapsed card looked completely idle even while
+        # streaming. Hidden once expanded since the full text/tool history
+        # below already shows everything this was a preview of.
+        preview_label = QLabel("")
+        preview_label.setWordWrap(True)
+        preview_label.setMaximumHeight(38)
+        preview_label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        preview_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12.5px; background: transparent;")
+        preview_label.setVisible(False)
+        layout.addWidget(preview_label)
 
         body_container = QWidget()
         body_container.setStyleSheet("background: transparent;")
@@ -520,15 +549,89 @@ class LogView(QScrollArea):
         body_container.setVisible(False)
         layout.addWidget(body_container)
         toggle.toggled.connect(
-            lambda checked, b=toggle, w=body_container: (
+            lambda checked, b=toggle, w=body_container, p=preview_label: (
                 b.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow),
                 w.setVisible(checked),
+                p.setVisible(not checked and bool(p.text())),
             )
         )
 
         self._add_timeline_row(time_text, COLOR_THINKING_ACCENT, card)
-        self._active_group = {"status_label": status_label, "body_layout": body_layout, "toggle": toggle}
+        self._active_group = {
+            "status_label": status_label,
+            "body_layout": body_layout,
+            "toggle": toggle,
+            "elapsed_label": elapsed_label,
+            "preview_label": preview_label,
+            "start_time": datetime.now(),
+            "completed": False,
+        }
+        self._start_group_timer()
         return self._active_group
+
+    def _start_group_timer(self) -> None:
+        if getattr(self, "_group_timer", None) is None:
+            self._group_timer = QTimer(self)
+            self._group_timer.setInterval(200)
+            self._group_timer.timeout.connect(self._tick_group_timer)
+        self._group_timer.start()
+
+    def _tick_group_timer(self) -> None:
+        group = self._active_group
+        if group is None or group.get("completed"):
+            self._group_timer.stop()
+            return
+        elapsed = (datetime.now() - group["start_time"]).total_seconds()
+        group["elapsed_label"].setText(f"{elapsed:.1f} s")
+
+    def _tail_lines(self, label: QLabel, text: str, max_lines: int = 2) -> str:
+        """Greedy word-wrap the *whole* text at the label's actual width,
+        then keep only the last `max_lines` -- a real previous-line +
+        current-line pair that scrolls up as new text arrives, not just a
+        fixed character count reflowed by Qt's own word wrap (which doesn't
+        add an ellipsis when it clips past the box, and doesn't line up
+        with "one more line underneath the current one")."""
+        metrics = QFontMetrics(label.font())
+        width = max(label.width(), 300)
+        words = " ".join(text.strip().split()).split(" ")
+        lines: list[str] = []
+        current = ""
+        for word in words:
+            candidate = f"{current} {word}".strip()
+            if metrics.horizontalAdvance(candidate) <= width or not current:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+        tail = lines[-max_lines:]
+        if len(lines) > max_lines and tail:
+            tail[0] = "…" + tail[0]
+        return "\n".join(tail)
+
+    def _update_group_preview(self, group: dict, text: str) -> None:
+        # "Current/last part of the reasoning" -- the tail of the text, not
+        # the start, is what's actually still relevant while it's still
+        # streaming (borrowed from LM Studio's collapsed-reasoning preview).
+        label = group["preview_label"]
+        snippet = self._tail_lines(label, text, max_lines=2)
+        label.setText(snippet)
+        if not group["toggle"].isChecked():
+            label.setVisible(bool(snippet))
+
+    def _finalize_group(self, group: dict) -> None:
+        """Called right before a group is closed (a new user/agent/error row
+        is about to start) -- freezes the elapsed timer and flips the
+        header to a completed state, matching how it looked while still
+        running (LM Studio does the same: "Thinking… 12.4s" while live,
+        "Completed" once done)."""
+        if group.get("completed"):
+            return
+        group["completed"] = True
+        elapsed = (datetime.now() - group["start_time"]).total_seconds()
+        group["elapsed_label"].setText(f"{elapsed:.1f} s")
+        self._set_group_status(group, "Completed ✓", COLOR_SUCCESS)
 
     def _group_content_added(self, group: dict) -> None:
         """New content inside an already-placed Working card doesn't change
@@ -582,6 +685,7 @@ class LogView(QScrollArea):
         layout.addWidget(body)
         group["body_layout"].addWidget(frame)
         self._pending_thinking = {"body": body, "text": text, "group": group}
+        self._update_group_preview(group, text)
         self._group_content_added(group)
 
     def _append_thinking_chunk(self, text: str) -> None:
@@ -590,6 +694,7 @@ class LogView(QScrollArea):
         pending["text"] = combined
         pending["body"].setProperty("raw_text", combined)
         pending["body"].setText(_with_soft_wrap_points(combined))
+        self._update_group_preview(pending["group"], combined)
         self._group_content_added(pending["group"])
 
     def _group_new_tool_call(self, tool_name: str, time_text: str, *, code: str | None = None) -> None:
