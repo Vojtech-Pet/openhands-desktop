@@ -2,6 +2,10 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-07-31 — Fixed status pill getting permanently stuck on "Running…"
+
+- The grace-window fix from earlier today (correct a stale ERROR/Waiting poll reading within 8s of real activity) could leave the status pill stuck showing "Running…" forever for a conversation that had genuinely finished, because the controller's status-poll loop only re-emits `state_changed` on an actual value change and had no way to know the override happened in the view layer. Confirmed live with a screenshot: "Running… 14m 27s" long after the agent's own completion message. Fixed with a generation-guarded scheduled re-check exactly when the grace window elapses.
+
 ## 2026-07-31 — Family-aware delete actually works now (sub_conversation_ids was a dead end)
 
 - The family-aware delete fix from earlier today read `sub_conversation_ids` to find a conversation's Continue-as-Code children -- end-to-end testing (a real Plan+Code pair created via the API, then actually run through the delete path) showed that field comes back empty on both the list and single-conversation endpoints, with or without `include_sub_conversations=true`, even on a parent with a real running child. It was silently a no-op beyond the one id already known.
