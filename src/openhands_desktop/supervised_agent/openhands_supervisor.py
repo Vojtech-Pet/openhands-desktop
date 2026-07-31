@@ -28,7 +28,6 @@ from openhands_desktop.core.conversation_controller import ConversationControlle
 from openhands_desktop.core.events import EventKind, NormalizedEvent
 from openhands_desktop.supervised_agent.control import (
     MAX_AGENT_STEPS,
-    MAX_AUTO_NUDGES,
     MAX_SAME_RESULT,
     NO_PROGRESS_WINDOW,
     call_hash,
@@ -37,14 +36,29 @@ from openhands_desktop.supervised_agent.control import (
     result_hash,
 )
 
-NUDGE_TEXT = (
+# Escalating, not repeated verbatim -- 2026-07-31: with a single generic
+# nudge (the old MAX_AUTO_NUDGES=1 from control.py, still used by
+# run_agent.py's standalone path), a genuinely stuck agent just tried the
+# *same* repeated call a third time and got hard-stopped into PAUSED,
+# needing the user to type something by hand every time. Each step here
+# asks for something more different than the last -- a different tool, then
+# skip the sub-task entirely, then wrap up -- before finally giving up.
+NUDGE_TEXTS = [
     "STUCK warning: rovnaký tool call s rovnakými argumentmi už bol vykonaný. "
     "Neopakuj ho. Zmeň stratégiu, použi existujúci výsledok z histórie, alebo "
-    "ak je úloha hotová, zvoľ finish."
-)
+    "ak je úloha hotová, zvoľ finish.",
+    "Stále opakuješ ten istý krok aj po predchádzajúcom upozornení. Prestaň to "
+    "skúšať znova rovnako -- vyber úplne iný nástroj alebo úplne iný prístup k "
+    "tejto konkrétnej časti úlohy.",
+    "Toto sa opakovane nedarí aj po zmene prístupu. Vzdaj sa tejto konkrétnej "
+    "podúlohy, zhrň v odpovedi čo sa doteraz podarilo a čo presne blokuje "
+    "zvyšok, a pokračuj ďalšou časťou úlohy (alebo zavolaj finish, ak nič iné "
+    "neostáva).",
+]
+MAX_AUTO_NUDGES = len(NUDGE_TEXTS)
 
 
-async def _interrupt_and_nudge(controller: ConversationController) -> None:
+async def _interrupt_and_nudge(controller: ConversationController, text: str) -> None:
     """Confirmed live 2026-07-30: sending a follow-up message immediately
     after interrupt() races the interrupt (it only "takes effect in ~1s" per
     ConversationController.interrupt's own docstring) -- the nudge message
@@ -53,7 +67,7 @@ async def _interrupt_and_nudge(controller: ConversationController) -> None:
     already accounts for this with the same delay; this path needs it too."""
     controller.interrupt()
     await asyncio.sleep(1.5)
-    controller.send_message(NUDGE_TEXT)
+    controller.send_message(text)
 
 
 class ConversationWatchdog:
@@ -137,13 +151,27 @@ class ConversationWatchdog:
 
                 if count > 1:
                     if self._nudges_used < MAX_AUTO_NUDGES:
+                        nudge_text = NUDGE_TEXTS[self._nudges_used]
                         self._nudges_used += 1
-                        self._emit({"kind": "nudge", "tool": tool_name})
-                        asyncio.ensure_future(_interrupt_and_nudge(self._controller))
+                        self._emit(
+                            {
+                                "kind": "nudge",
+                                "tool": tool_name,
+                                "attempt": self._nudges_used,
+                                "of": MAX_AUTO_NUDGES,
+                            }
+                        )
+                        asyncio.ensure_future(_interrupt_and_nudge(self._controller, nudge_text))
                     else:
                         self._stopped = True
                         self._emit(
-                            {"kind": "stuck", "reason": f"Opakovaný tool call ({tool_name}) po auto-nudge."}
+                            {
+                                "kind": "stuck",
+                                "reason": (
+                                    f"Opakovaný tool call ({tool_name}) aj po {MAX_AUTO_NUDGES} "
+                                    "rôznych auto-nudge pokusoch."
+                                ),
+                            }
                         )
                         self._controller.interrupt()
                         return

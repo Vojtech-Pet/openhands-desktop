@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QScrollArea,
     QSizePolicy,
     QToolButton,
@@ -180,6 +181,25 @@ class LogView(QScrollArea):
         self._layout.setSpacing(SPACE_MD)
         self._layout.addStretch(1)
         self.setWidget(container)
+
+        # Floating "jump to bottom" button -- shown only when scrolled up
+        # away from the live edge (so it doesn't just sit there uselessly
+        # while already following), a child of the QScrollArea itself
+        # (viewport-relative position, not part of the scrolled content) so
+        # it stays anchored to the bottom-right corner as the log scrolls.
+        self._scroll_to_bottom_btn = QPushButton("↓", self)
+        self._scroll_to_bottom_btn.setFixedSize(36, 36)
+        self._scroll_to_bottom_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._scroll_to_bottom_btn.setToolTip("Scroll to the latest message")
+        self._scroll_to_bottom_btn.setStyleSheet(
+            "QPushButton { background-color: rgba(10, 14, 22, 220); color: #FFFFFF; "
+            "border: 1px solid rgba(255, 255, 255, 40); border-radius: 18px; font-size: 15px; }"
+            "QPushButton:hover { background-color: rgba(30, 36, 48, 235); }"
+        )
+        self._scroll_to_bottom_btn.clicked.connect(self._scroll_to_bottom_now)
+        self._scroll_to_bottom_btn.hide()
+        self.verticalScrollBar().valueChanged.connect(self._update_scroll_to_bottom_btn)
+        self.verticalScrollBar().rangeChanged.connect(lambda *_: self._update_scroll_to_bottom_btn())
 
         self._entries: list[str] = []  # plain-text mirror, for tests/back-compat
 
@@ -507,8 +527,23 @@ class LogView(QScrollArea):
         )
 
         self._add_timeline_row(time_text, COLOR_THINKING_ACCENT, card)
-        self._active_group = {"status_label": status_label, "body_layout": body_layout}
+        self._active_group = {"status_label": status_label, "body_layout": body_layout, "toggle": toggle}
         return self._active_group
+
+    def _group_content_added(self, group: dict) -> None:
+        """New content inside an already-placed Working card doesn't change
+        _add_timeline_row's row count, so its own was-at-bottom/scroll logic
+        never runs for it -- confirmed live 2026-07-31: once a user expanded
+        a Working card to watch it live, further thinking/tool_call/result
+        growth inside it stopped auto-following, unlike everything else.
+        Only matters while the card is actually expanded; collapsed growth
+        doesn't change the visible height at all."""
+        if not group["toggle"].isChecked():
+            return
+        bar = self.verticalScrollBar()
+        was_at_bottom = bar.value() >= bar.maximum() - self._AT_BOTTOM_TOLERANCE_PX
+        if was_at_bottom:
+            self._scroll_to_bottom()
 
     def _group_sub_card(self, border_color: str) -> tuple[QFrame, QVBoxLayout]:
         frame = QFrame()
@@ -546,7 +581,8 @@ class LogView(QScrollArea):
         body = self._body_label(text, color=COLOR_THINKING_TEXT)
         layout.addWidget(body)
         group["body_layout"].addWidget(frame)
-        self._pending_thinking = {"body": body, "text": text}
+        self._pending_thinking = {"body": body, "text": text, "group": group}
+        self._group_content_added(group)
 
     def _append_thinking_chunk(self, text: str) -> None:
         pending = self._pending_thinking
@@ -554,6 +590,7 @@ class LogView(QScrollArea):
         pending["text"] = combined
         pending["body"].setProperty("raw_text", combined)
         pending["body"].setText(_with_soft_wrap_points(combined))
+        self._group_content_added(pending["group"])
 
     def _group_new_tool_call(self, tool_name: str, time_text: str, *, code: str | None = None) -> None:
         group = self._ensure_activity_group(time_text)
@@ -594,6 +631,7 @@ class LogView(QScrollArea):
         self._pending_tool = {
             "pill": pill, "body": body, "meta_container": meta_container, "code": code, "group": group,
         }
+        self._group_content_added(group)
 
     def _group_new_note(
         self, text: str, time_text: str, *, status: str | None = None, color: str = TEXT_MUTED
@@ -608,6 +646,7 @@ class LogView(QScrollArea):
         label = self._body_label(text, color=color)
         label.setStyleSheet(f"background: transparent; font-size: 12px; color: {color};")
         group["body_layout"].addWidget(label)
+        self._group_content_added(group)
 
     def _resolve_pending_tool(self, status: str, text: str, meta: dict | None = None) -> None:
         pending = self._pending_tool
@@ -634,6 +673,7 @@ class LogView(QScrollArea):
         group = pending.get("group")
         if group is not None:
             self._set_group_status(group, "Working…")
+            self._group_content_added(group)
 
     def _populate_meta(self, container: QWidget, meta: dict) -> None:
         """Structured Command/Working directory/Exit code/Duration block --
@@ -698,3 +738,17 @@ class LogView(QScrollArea):
     def _scroll_to_bottom_now(self) -> None:
         bar = self.verticalScrollBar()
         bar.setValue(bar.maximum())
+
+    def _update_scroll_to_bottom_btn(self) -> None:
+        bar = self.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - self._AT_BOTTOM_TOLERANCE_PX
+        # Nothing to scroll to yet on an empty/short log (maximum 0) either.
+        self._scroll_to_bottom_btn.setVisible(not at_bottom and bar.maximum() > 0)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 -- Qt override
+        super().resizeEvent(event)
+        margin = 14
+        self._scroll_to_bottom_btn.move(
+            self.width() - self._scroll_to_bottom_btn.width() - margin,
+            self.height() - self._scroll_to_bottom_btn.height() - margin,
+        )

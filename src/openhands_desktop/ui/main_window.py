@@ -290,8 +290,22 @@ class ChatInputEdit(QPlainTextEdit):
         super().keyPressEvent(event)
 
 
+# Windows opened via "Continue as Code" (2026-07-31) need a reference kept
+# somewhere for the lifetime of the window -- nothing else in the app holds
+# one, and a QWidget with no Python (or Qt-parent) reference left is fair
+# game for Python's GC despite still being shown on screen.
+_secondary_windows: list["MainWindow"] = []
+
+
 class MainWindow(QMainWindow):
-    def __init__(self, client: AppServerClient, history_store: HistoryStore | None = None) -> None:
+    def __init__(
+        self,
+        client: AppServerClient,
+        history_store: HistoryStore | None = None,
+        *,
+        shared_ask_user_server: AskUserServer | None = None,
+        shared_workspace_server: WorkspaceFolderServer | None = None,
+    ) -> None:
         super().__init__()
         self.setWindowTitle("OpenHands Desktop")
         self.resize(1100, 720)
@@ -335,8 +349,19 @@ class MainWindow(QMainWindow):
         self._shutdown_started = False
         self._controller: ConversationController | None = None
         self._settings_dialog: SettingsDialog | None = None
-        self._ask_user_server = AskUserServer(self._on_agent_question)
-        self._workspace_server = WorkspaceFolderServer(
+        # A second window ("Continue as Code" opening its own window,
+        # 2026-07-31) can't start its own AskUserServer/WorkspaceFolderServer
+        # -- they're fixed-port (8901/8902) singletons for this whole
+        # process, and a second uvicorn.Server on the same port would just
+        # fail to bind. It reuses the first window's already-running
+        # instances instead; confirmation dialogs for its conversations
+        # then show on the *first* window (whichever one owns the callback
+        # these were constructed with), not perfectly attributed but never
+        # silently dropped either. _owns_mcp_servers gates start/stop and
+        # registration so only the owning window does any of that.
+        self._owns_mcp_servers = shared_ask_user_server is None
+        self._ask_user_server = shared_ask_user_server or AskUserServer(self._on_agent_question)
+        self._workspace_server = shared_workspace_server or WorkspaceFolderServer(
             on_connected=self._on_agent_connected_folder,
             on_confirm_connect=self._confirm_workspace_connect,
             on_confirm_write=self._confirm_workspace_write,
@@ -1937,7 +1962,8 @@ class MainWindow(QMainWindow):
         kind = event.get("kind")
         if kind == "nudge":
             self._append_log(
-                f"[Auto-supervise: repeated tool call ({event.get('tool')}) -- nudging]",
+                f"[Auto-supervise: repeated tool call ({event.get('tool')}) -- "
+                f"nudging, attempt {event.get('attempt')}/{event.get('of')}]",
                 kind="system",
             )
         elif kind == "stuck":
@@ -1993,48 +2019,57 @@ class MainWindow(QMainWindow):
         asyncio.ensure_future(self._continue_as_code_async())
 
     async def _continue_as_code_async(self) -> None:
+        # 2026-07-31: opens in a brand new window instead of reusing/
+        # mutating this one's widgets. Reusing this window's state_label
+        # required an explicit reset-to-"Starting…" (still done for the
+        # window that opens itself, see _start_as_code_continuation) and was
+        # still fragile -- e.g. Mission Control or the sidebar reading this
+        # window's mid-transition state. A second window can't show a stale
+        # value from a conversation it never had; this one just keeps
+        # showing the Plan conversation's real, correct "Finished" state.
         if self._controller is None or self._controller.conversation_id is None:
             return
         parent_id = self._controller.conversation_id
+        self.continue_as_code_btn.setVisible(False)
         default_code_model = self._settings.value("default_code_model_name")
-        if default_code_model:
+        new_window = MainWindow(
+            AppServerClient(self._client.base_url),
+            shared_ask_user_server=self._ask_user_server,
+            shared_workspace_server=self._workspace_server,
+        )
+        new_window.setWindowIcon(self.windowIcon())
+        _secondary_windows.append(new_window)
+        new_window.show()
+        asyncio.ensure_future(new_window._start_as_code_continuation(parent_id, default_code_model))
+
+    async def _start_as_code_continuation(self, parent_id: str, profile_name: str | None) -> None:
+        """Runs on the freshly opened window from _continue_as_code_async,
+        right after construction -- does the same model-load + start_new
+        _continue_as_code_async used to do in place, minus every step that
+        was only there to reset *this* window's widgets away from a stale
+        previous conversation (a brand new window has nothing stale to
+        reset)."""
+        await self._load_custom_instructions()
+        if profile_name:
             self.model_combo.blockSignals(True)
-            self._switch_to_named_model(default_code_model)
+            self._switch_to_named_model(profile_name)
             self.model_combo.blockSignals(False)
             self._set_model_switching(True)
             try:
-                await self._ensure_profile_ready(default_code_model)
+                await self._ensure_profile_ready(profile_name)
             except Exception as exc:  # noqa: BLE001
                 self._on_error(f"Could not load the Code model: {exc}")
                 return
             finally:
                 self._set_model_switching(False)
         self._current_agent_type = "default"
-        self.continue_as_code_btn.setVisible(False)
-        self._tool_call_count = 0
-        self._estimated_context_chars = 0
-        self._real_used_tokens = 0
-        self._real_context_window = 0
-        self._auto_compact_triggered = False
-        self._update_tool_call_label()
-        # Without this, the status pill keeps showing the parent conversation's
-        # terminal state ("Finished (unverified)") until the new conversation's
-        # own first state_changed event arrives -- which looks exactly like the
-        # new conversation is stuck, even while it's actively running.
-        self.state_label.setText("Starting…")
-        self.state_label.setObjectName("")
-        self.state_label.setToolTip("")
-        _repolish(self.state_label)
-        self._new_controller()
-        self.log.clear()
-        self.stack.setCurrentWidget(self.log)
-        self._append_log(f"[continuing plan from conversation {parent_id} as a Code agent…]")
         self.agent_type_combo.setCurrentIndex(self.agent_type_combo.findData("default"))
         self.agent_type_combo.setEnabled(False)
         model = self._selected_model()
-        self.agent_type_combo.setEnabled(False)
         self._pending_model = model
         self._pending_title = "Continued from plan"
+        self.stack.setCurrentWidget(self.log)
+        self._append_log(f"[continuing plan from conversation {parent_id} as a Code agent…]")
         self._controller.start_new(
             llm_model=model,
             initial_message="Continue implementing the plan from the previous conversation.",
@@ -2050,8 +2085,9 @@ class MainWindow(QMainWindow):
         await self._refresh_sidebar_history_async()
         await self._presets.init()
         await self._reload_presets_async()
-        await self._start_ask_user_server()
-        await self._start_workspace_server()
+        if self._owns_mcp_servers:
+            await self._start_ask_user_server()
+            await self._start_workspace_server()
         await self._load_custom_instructions()
 
     async def _start_ask_user_server(self) -> None:
@@ -2224,6 +2260,34 @@ class MainWindow(QMainWindow):
         loop. show() keeps it serving while the question is on screen.
         """
         self._append_log(pending.question, kind="agent")
+        if self.mode_combo.currentData() != "bypass":
+            # Confirmed live 2026-07-31: a real ask_user_question sat
+            # unanswered because the app window was minimized/behind others
+            # and nobody noticed the non-modal dialog -- the conversation
+            # then just sat blocked with no visible sign anything needed
+            # attention. Force the whole window forward, not just the
+            # dialog, whenever an answer is actually expected from the user.
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+        if self.mode_combo.currentData() == "bypass":
+            # Confirmed live 2026-07-31: an unattended conversation's
+            # ask_user_question sat blocked forever with nobody around to
+            # answer it, and OpenHands's own stuck detector kept
+            # interrupting the *next* thing it tried instead -- the actual
+            # blocker (the unanswered question) was never resolved. Bypass
+            # mode already means "don't wait for the user" for
+            # connect_folder/write_file; extending that here unblocks the
+            # agent immediately instead of leaving it stuck on a question
+            # nobody will ever see.
+            answer = (
+                "No user is available to answer right now (Bypass permissions mode). "
+                "Use your own best judgment and proceed autonomously -- do not wait "
+                "for a response to this question."
+            )
+            self._append_log(f"[Auto-answered (Bypass permissions mode): {answer}]", kind="system")
+            pending.future.set_result(answer)
+            return
         dialog = AskUserDialog(self, pending.question, pending.options, pending.multi_select)
 
         def _resolve() -> None:
@@ -2496,13 +2560,22 @@ class MainWindow(QMainWindow):
             )
             if self._controller is not None:
                 await self._controller.stop()
-            # Unregister BEFORE closing the client -- it needs a live
-            # connection, and leaving the entry behind breaks every future
-            # conversation (see _unregister_ask_user_mcp).
-            await self._unregister_ask_user_mcp()
-            await self._ask_user_server.stop()
-            await self._unregister_workspace_mcp()
-            await self._workspace_server.stop()
+            if self._owns_mcp_servers and not _secondary_windows:
+                # Unregister BEFORE closing the client -- it needs a live
+                # connection, and leaving the entry behind breaks every
+                # future conversation (see _unregister_ask_user_mcp). A
+                # non-owning window must never do this -- it would rip the
+                # tool out from under whichever window actually owns it. If
+                # any secondary window is still open, it's depending on
+                # these same shared instances -- leave them running rather
+                # than break it out from under it; nothing currently stops
+                # them in that case; a real cleanup path can be added if
+                # this order (primary closes first, children stay open)
+                # turns out to be common in practice.
+                await self._unregister_ask_user_mcp()
+                await self._ask_user_server.stop()
+                await self._unregister_workspace_mcp()
+                await self._workspace_server.stop()
             other_conversations_running = False
             try:
                 conversations = await self._client.search_conversations(limit=50)
@@ -2529,4 +2602,6 @@ class MainWindow(QMainWindow):
                     pass
         finally:
             self._shutdown_complete = True
+            if self in _secondary_windows:
+                _secondary_windows.remove(self)
             self.close()
