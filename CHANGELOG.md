@@ -2,6 +2,10 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-08-01 — Flash the taskbar icon when a background window's agent replies
+
+- With two windows open, a real agent reply in the window you're not looking at was easy to miss entirely. A lighter, non-intrusive notification (taskbar/dock flash only, no stolen focus) now fires whenever a genuine agent message or finish() lands in a window that isn't currently active.
+
 ## 2026-08-01 — Mission Control detects orphaned sandbox containers
 
 - An app-server restart mid-conversation loses its (in-memory-only) sandbox bookkeeping, but the actual Docker container keeps running -- `docker ps` sees it fine while the search API reports `sandbox_status: "MISSING"` or omits the conversation entirely, so nothing in the API can reach or stop it, and the app previously had no way to even know it existed. Mission Control now cross-checks `docker ps` against every conversation's reported sandbox on each reload, surfaces any unmatched container as "orphaned", and offers a direct Stop-container action.
