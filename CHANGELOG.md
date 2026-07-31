@@ -2,6 +2,12 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-07-31 — Family-aware delete actually works now (sub_conversation_ids was a dead end)
+
+- The family-aware delete fix from earlier today read `sub_conversation_ids` to find a conversation's Continue-as-Code children -- end-to-end testing (a real Plan+Code pair created via the API, then actually run through the delete path) showed that field comes back empty on both the list and single-conversation endpoints, with or without `include_sub_conversations=true`, even on a parent with a real running child. It was silently a no-op beyond the one id already known.
+- `get_conversation()` was also missing `include_sub_conversations=true` (only `search_conversations()` had it) -- without it, `parent_conversation_id` itself comes back `null` even for a genuine child.
+- New `resolve_conversation_family()` walks the real graph via `parent_conversation_id` only (up to the root, then back down by scanning for matches) -- verified directly against a real API-created Plan+Code pair that it finds the correct family from either id, and that deleting it actually removes the shared Docker container afterward.
+
 ## 2026-07-31 — Continue-as-Code status/sidebar fixes, family-aware delete, live LLM toggle push
 
 - `search_conversations()` was missing `include_sub_conversations=true` -- Continue-as-Code children were completely invisible to Mission Control and to the "is anything else running" safety check used before unloading the model.
