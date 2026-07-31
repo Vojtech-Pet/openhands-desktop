@@ -2468,6 +2468,19 @@ class MainWindow(QMainWindow):
         finally:
             self._auto_nudge_in_flight = False
 
+    def _flash_if_unfocused(self) -> None:
+        """Lighter-weight cousin of _notify_needs_attention: flashes the
+        taskbar/dock icon without stealing focus or raising the window.
+
+        Added for the second-window feature -- with two windows open, real
+        agent replies in the one you're not looking at were easy to miss
+        entirely (it just keeps going quietly in the background); a full
+        _notify_needs_attention() would be too disruptive here since it
+        forces the window to the front, yanking focus away from whatever
+        the user is actually doing in the other one. This just flashes."""
+        if not self.isActiveWindow():
+            QApplication.alert(self)
+
     def _notify_needs_attention(self) -> None:
         """Forces the window to the front and flashes the taskbar icon --
         used whenever the agent stops/errors and genuinely needs the user's
@@ -2950,6 +2963,7 @@ class MainWindow(QMainWindow):
                 finish_message = action.get("message")
             if finish_message:
                 self._append_log(finish_message, kind="agent", timestamp=event.timestamp)
+                self._flash_if_unfocused()
             else:
                 action = event.raw.get("action") or {}
                 code_preview = _format_action_code(event.tool_name, action)
@@ -3011,6 +3025,7 @@ class MainWindow(QMainWindow):
                     self._append_log(visible_text, kind="user", timestamp=event.timestamp)
             if event.source == "agent" and event.text:
                 self._append_log(event.text, kind="agent", timestamp=event.timestamp)
+                self._flash_if_unfocused()
         elif event.kind == EventKind.AGENT_ERROR:
             self._append_log(str(event.raw), kind="error", timestamp=event.timestamp)
         elif event.kind == EventKind.CONVERSATION_ERROR:
