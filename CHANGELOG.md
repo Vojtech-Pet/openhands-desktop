@@ -2,6 +2,10 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-08-01 — Mission Control detects orphaned sandbox containers
+
+- An app-server restart mid-conversation loses its (in-memory-only) sandbox bookkeeping, but the actual Docker container keeps running -- `docker ps` sees it fine while the search API reports `sandbox_status: "MISSING"` or omits the conversation entirely, so nothing in the API can reach or stop it, and the app previously had no way to even know it existed. Mission Control now cross-checks `docker ps` against every conversation's reported sandbox on each reload, surfaces any unmatched container as "orphaned", and offers a direct Stop-container action.
+
 ## 2026-07-31 — Fixed Plan getting stuck trying to delegate (it has no launch_subagent tool)
 
 - A mandatory sub-agent delegation instruction (for a user-specific project) had been added to the shared base suffix, which Plan also receives -- Plan has no `launch_subagent` tool at all (confirmed live), so it got stuck searching the filesystem trying to "find" the subagent and hit the STUCK detector. Moved the delegation instruction into Code-only instructions; Plan now knows it doesn't have delegation and writes a note into PLAN.md for Code to delegate instead.
