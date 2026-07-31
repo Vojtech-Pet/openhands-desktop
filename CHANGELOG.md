@@ -2,6 +2,15 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-07-31 — Fixed a serious bug: conversations could get permanently stuck on an unanswered question
+
+- A conversation not attached to any open window could hang forever on `ask_user_question` with nobody able to see or answer it -- the agent would sit blocked (or get repeatedly interrupted by OpenHands's own stuck detector trying something else) with no visible sign anything needed attention.
+- `ConversationWatchdog` now tries 3 escalating nudges (different tool → skip the sub-task → wrap up and finish) instead of 1 generic one before giving up, so most stuck loops resolve themselves without the user having to intervene by hand.
+- `ask_user_question` auto-answers immediately in Bypass permissions mode instead of blocking forever.
+- In Auto/Manual mode, the app window is forced to the front whenever a real answer is expected from the user, instead of relying on a non-modal dialog nobody notices behind other windows.
+- "Continue as Code" now opens in its own new window instead of reusing the Plan window's widgets, so the Plan window can never show a stale status from a conversation that moved on.
+- Log view: a floating "jump to bottom" button; auto-follow now also works for new content added inside an already-expanded Working card.
+
 ## 2026-07-31 — Auto-supervise, collapsed Working group, MCP race/freeze/keep-alive fixes
 
 - Every new conversation is now auto-supervised by default (`ConversationWatchdog`: hash-dedup + progress scoring, nudge once on a repeated tool call, stop if it repeats again) — toggle in Settings → Agent.
