@@ -2,6 +2,10 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-07-31 — Warn when sending a chat message to a busy conversation
+
+- `send-message` only appends to the conversation's event history -- it does not interrupt an in-flight LLM call, and whether the agent even acts on a new message depends entirely on the model noticing and prioritizing it over what it was already doing. Verified live: a message telling a running agent to "stop, wait for instructions" was recorded in ~0.15s but had zero effect -- the agent kept executing its original plan through several more steps. Sending a message while the conversation is running now shows a note that it's queued, not acted on immediately, and to use Stop first for an actual immediate reaction.
+
 ## 2026-07-31 — Reset log/Errors count when the active conversation is deleted from Mission Control
 
 - Deleting the currently-shown conversation via Mission Control (instead of the sidebar) left the window displaying a stale log/Errors count for a conversation that no longer existed server-side -- Mission Control now tells the main window when this happens, which resets itself and drops matching local sidebar entries.
