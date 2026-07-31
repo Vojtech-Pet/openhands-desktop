@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from openhands_desktop.api.client import AppServerClient
-from openhands_desktop.api.models import AppConversation, ExecutionStatus
+from openhands_desktop.api.models import AppConversation, ExecutionStatus, resolve_conversation_family
 from openhands_desktop.ui.async_utils import run_async
 from openhands_desktop.ui.palette import (
     BG_SURFACE_1,
@@ -193,16 +193,11 @@ class TaskBoardDialog(QDialog):
         # conversation referencing it is deleted -- deleting just the one
         # the user clicked left the container running (confirmed live
         # 2026-07-31). self._conversations is the live list this dialog
-        # just loaded (now includes sub-conversations), so the family can
-        # be resolved locally instead of another round trip.
-        by_id = {c.id: c for c in self._conversations}
-        family_ids = {conversation_id}
-        conversation = by_id.get(conversation_id)
-        if conversation is not None:
-            parent_id = conversation.raw.get("parent_conversation_id")
-            if parent_id:
-                family_ids.add(parent_id)
-            family_ids.update(conversation.raw.get("sub_conversation_ids") or [])
+        # just loaded (now includes sub-conversations, and with it
+        # parent_conversation_id populated), so the family can be resolved
+        # locally instead of another round trip. NOT sub_conversation_ids --
+        # confirmed unreliable/empty even on a parent with a real child.
+        family_ids = resolve_conversation_family(conversation_id, self._conversations)
         for family_id in family_ids:
             try:
                 await self._client.delete_conversation(family_id)

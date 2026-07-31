@@ -348,8 +348,18 @@ class AppServerClient:
         ("Expecting value: line 1 column 1"). /search correctly returns
         application/json either way, so it's used as the single-conversation
         lookup unconditionally rather than only as a fallback.
+
+        `include_sub_conversations=true` matters here too, and not just for
+        the list endpoint: confirmed live 2026-07-31 that even a single
+        by-id lookup returns `parent_conversation_id: null` for a genuine
+        Continue-as-Code child without this flag -- silently breaking
+        anything that reads it (e.g. resolving the Plan/Code family before
+        a delete).
         """
-        resp = await self._client.get("/api/v1/app-conversations/search", params={"ids": conversation_id})
+        resp = await self._client.get(
+            "/api/v1/app-conversations/search",
+            params={"ids": conversation_id, "include_sub_conversations": "true"},
+        )
         resp.raise_for_status()
         items = resp.json().get("items", [])
         if not items:

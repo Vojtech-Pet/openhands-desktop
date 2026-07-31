@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from openhands_desktop.api.client import AppServerClient
+from openhands_desktop.api.models import resolve_conversation_family
 from openhands_desktop.api.llm_server_client import (
     DEFAULT_LM_STUDIO_CONTEXT_LENGTH,
     classify_plan_or_code,
@@ -1083,14 +1084,13 @@ class MainWindow(QMainWindow):
         # sandbox if unreferenced") -- confirmed live 2026-07-31: deleting
         # only the visible half left the container running because the
         # other half (parent or child) still referenced it. Delete the
-        # whole family, not just the one id the user clicked.
+        # whole family, not just the one id the user clicked -- resolved via
+        # resolve_conversation_family, NOT sub_conversation_ids (confirmed
+        # unreliable/empty even on a parent with a real running child).
         family_ids = {conversation_id}
         try:
-            conversation = await self._client.get_conversation(conversation_id)
-            parent_id = conversation.raw.get("parent_conversation_id")
-            if parent_id:
-                family_ids.add(parent_id)
-            family_ids.update(conversation.raw.get("sub_conversation_ids") or [])
+            all_conversations = await self._client.search_conversations()
+            family_ids = resolve_conversation_family(conversation_id, all_conversations)
         except Exception:  # noqa: BLE001 -- best effort; still delete the one id we know about
             pass
         for family_id in family_ids:

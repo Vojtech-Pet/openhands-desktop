@@ -103,3 +103,40 @@ class AppConversation:
             sandbox_id=data.get("sandbox_id"),
             raw=data,
         )
+
+
+def resolve_conversation_family(conversation_id: str, all_conversations: list["AppConversation"]) -> set[str]:
+    """Every conversation id sharing a sandbox with `conversation_id` (a
+    Continue-as-Code parent/child pair, walked in both directions).
+
+    Deliberately does NOT read `sub_conversation_ids` -- confirmed live
+    2026-07-31 that it comes back empty even on a parent with a real,
+    running child, on both the list and single-conversation endpoints, with
+    or without `include_sub_conversations=true`. `parent_conversation_id`
+    IS reliable (with that query flag -- see AppServerClient.get_conversation
+    /search_conversations), so the family is resolved by walking up to the
+    root via that field, then back down by scanning every conversation in
+    `all_conversations` for a `parent_conversation_id` matching something
+    already found -- a real graph traversal, not a single hop, so a chain
+    deeper than one Plan->Code step still resolves correctly.
+    """
+    by_id = {c.id: c for c in all_conversations}
+    family = {conversation_id}
+    root_id = conversation_id
+    while True:
+        conversation = by_id.get(root_id)
+        parent_id = conversation.raw.get("parent_conversation_id") if conversation else None
+        if not parent_id or parent_id in family:
+            break
+        family.add(parent_id)
+        root_id = parent_id
+    changed = True
+    while changed:
+        changed = False
+        for conversation in all_conversations:
+            if conversation.id in family:
+                continue
+            if conversation.raw.get("parent_conversation_id") in family:
+                family.add(conversation.id)
+                changed = True
+    return family
