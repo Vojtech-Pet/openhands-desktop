@@ -311,11 +311,16 @@ class ChatInputEdit(QPlainTextEdit):
         super().keyPressEvent(event)
 
 
+_open_windows: list["MainWindow"] = []
+
+
 class MainWindow(QMainWindow):
     def __init__(
         self,
         client: AppServerClient,
         history_store: HistoryStore | None = None,
+        shared_ask_user_server: "AskUserServer | None" = None,
+        shared_workspace_server: "WorkspaceFolderServer | None" = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("OpenHands Desktop")
@@ -386,8 +391,23 @@ class MainWindow(QMainWindow):
         self._shutdown_started = False
         self._controller: ConversationController | None = None
         self._settings_dialog: SettingsDialog | None = None
-        self._ask_user_server = AskUserServer(self._on_agent_question)
-        self._workspace_server = WorkspaceFolderServer(
+        # Bound to fixed ports (see main.py's single-instance guard note),
+        # so a second window must reuse these, not construct its own --
+        # otherwise it just fails to bind. Only the window that actually
+        # created them ("owns" them) tears them down, and only once it's
+        # the last window left open -- see _shutdown_before_close.
+        #
+        # KNOWN LIMITATION: the callbacks below are bound to *this*
+        # window's handlers regardless of which window's conversation
+        # actually triggered the MCP call, so an ask_user_question or
+        # workspace-connect confirmation from a second window's
+        # conversation currently pops up on the window that owns the
+        # servers, not the one whose conversation is asking. Acceptable
+        # for now (nothing is silently lost, just surfaces on the "wrong"
+        # window) but worth revisiting if that proves confusing in practice.
+        self._owns_mcp_servers = shared_ask_user_server is None
+        self._ask_user_server = shared_ask_user_server or AskUserServer(self._on_agent_question)
+        self._workspace_server = shared_workspace_server or WorkspaceFolderServer(
             on_connected=self._on_agent_connected_folder,
             on_confirm_connect=self._confirm_workspace_connect,
             on_confirm_write=self._confirm_workspace_write,
@@ -395,6 +415,7 @@ class MainWindow(QMainWindow):
         self._custom_instructions_text = ""
         self._error_history: list[tuple[datetime, str]] = []
         self._llm_server_state = "unreachable"
+        _open_windows.append(self)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -1383,7 +1404,30 @@ class MainWindow(QMainWindow):
         mempalace_action.triggered.connect(self._save_to_mempalace)
         code_action = menu.addAction(icon("code", 16), "Insert code block")
         code_action.triggered.connect(self._insert_code_block)
+        menu.addSeparator()
+        new_window_action = menu.addAction(icon("model-ai", 16), "New window")
+        new_window_action.setToolTip(
+            "Open a second, fully independent window -- its own conversation, "
+            "responsive even while this one is busy working."
+        )
+        new_window_action.triggered.connect(self._open_new_window)
         menu.exec(self.more_btn.mapToGlobal(self.more_btn.rect().bottomLeft()))
+
+    def _open_new_window(self) -> None:
+        # Shares this process's AppServerClient and the two MCP servers
+        # (AskUserServer/WorkspaceFolderServer) -- they're bound to fixed
+        # ports (see the single-instance guard in main.py), so a second
+        # window creating its OWN instances would just fail to bind, not
+        # get a working second copy. Only the last window still open when
+        # one closes actually tears those down -- see _shutdown_before_close.
+        window = MainWindow(
+            self._client,
+            history_store=self._history,
+            shared_ask_user_server=self._ask_user_server,
+            shared_workspace_server=self._workspace_server,
+        )
+        window.setWindowIcon(self.windowIcon())
+        window.show()
 
     def _save_current_as_preset(self) -> None:
         name, ok = QInputDialog.getText(self, "Save preset", "Preset name:")
@@ -2590,8 +2634,13 @@ class MainWindow(QMainWindow):
         await self._refresh_sidebar_history_async()
         await self._presets.init()
         await self._reload_presets_async()
-        await self._start_ask_user_server()
-        await self._start_workspace_server()
+        if self._owns_mcp_servers:
+            # A second window's servers are the SAME already-started
+            # objects (see __init__) -- calling .start() again would try
+            # to bind their fixed ports a second time and fail, since the
+            # owning window's uvicorn instance is still listening on them.
+            await self._start_ask_user_server()
+            await self._start_workspace_server()
         await self._load_custom_instructions()
 
     async def _start_ask_user_server(self) -> None:
@@ -3086,11 +3135,19 @@ class MainWindow(QMainWindow):
 
     async def _shutdown_before_close(self) -> None:
         try:
+            if self._controller is not None:
+                await self._controller.stop()
+            if self in _open_windows:
+                _open_windows.remove(self)
+            if _open_windows:
+                # Other windows are still open and share this process's
+                # client/MCP servers -- only the truly last window closing
+                # tears those down (see below); this one just closes its
+                # own widget.
+                return
             closing_conversation_id = (
                 self._controller.conversation_id if self._controller is not None else None
             )
-            if self._controller is not None:
-                await self._controller.stop()
             # Unregister BEFORE closing the client -- it needs a live
             # connection, and leaving the entry behind breaks every future
             # conversation (see _unregister_ask_user_mcp).
