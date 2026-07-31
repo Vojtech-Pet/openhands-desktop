@@ -1076,13 +1076,31 @@ class MainWindow(QMainWindow):
             asyncio.ensure_future(self._delete_conversation_async(conversation_id))
 
     async def _delete_conversation_async(self, conversation_id: str) -> None:
+        # A Continue-as-Code parent/child pair shares one sandbox container
+        # server-side, and the server only actually tears the sandbox down
+        # once EVERY conversation referencing it is gone (see
+        # app_conversation_router.py's _finalize_sandbox_delete: "delete the
+        # sandbox if unreferenced") -- confirmed live 2026-07-31: deleting
+        # only the visible half left the container running because the
+        # other half (parent or child) still referenced it. Delete the
+        # whole family, not just the one id the user clicked.
+        family_ids = {conversation_id}
         try:
-            await self._client.delete_conversation(conversation_id)
-        except Exception:  # noqa: BLE001 -- server-side record may already be gone; still drop it locally
+            conversation = await self._client.get_conversation(conversation_id)
+            parent_id = conversation.raw.get("parent_conversation_id")
+            if parent_id:
+                family_ids.add(parent_id)
+            family_ids.update(conversation.raw.get("sub_conversation_ids") or [])
+        except Exception:  # noqa: BLE001 -- best effort; still delete the one id we know about
             pass
-        await self._history.delete(conversation_id)
-        if self._controller is not None and self._controller.conversation_id == conversation_id:
-            self._start_fresh_conversation()
+        for family_id in family_ids:
+            try:
+                await self._client.delete_conversation(family_id)
+            except Exception:  # noqa: BLE001 -- server-side record may already be gone; still drop it locally
+                pass
+            await self._history.delete(family_id)
+            if self._controller is not None and self._controller.conversation_id == family_id:
+                self._start_fresh_conversation()
         await self._refresh_sidebar_history_async()
 
     def _open_settings(self) -> None:

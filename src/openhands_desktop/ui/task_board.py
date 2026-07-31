@@ -182,10 +182,32 @@ class TaskBoardDialog(QDialog):
         if reply == QMessageBox.StandardButton.Yes:
             run_async(
                 self,
-                self._client.delete_conversation(conversation_id),
+                self._delete_family(conversation_id),
                 lambda _result: self._reload(),
                 error_title="Failed to delete conversation",
             )
+
+    async def _delete_family(self, conversation_id: str) -> None:
+        # A Continue-as-Code parent/child pair shares one sandbox
+        # container server-side, which is only torn down once EVERY
+        # conversation referencing it is deleted -- deleting just the one
+        # the user clicked left the container running (confirmed live
+        # 2026-07-31). self._conversations is the live list this dialog
+        # just loaded (now includes sub-conversations), so the family can
+        # be resolved locally instead of another round trip.
+        by_id = {c.id: c for c in self._conversations}
+        family_ids = {conversation_id}
+        conversation = by_id.get(conversation_id)
+        if conversation is not None:
+            parent_id = conversation.raw.get("parent_conversation_id")
+            if parent_id:
+                family_ids.add(parent_id)
+            family_ids.update(conversation.raw.get("sub_conversation_ids") or [])
+        for family_id in family_ids:
+            try:
+                await self._client.delete_conversation(family_id)
+            except Exception:  # noqa: BLE001 -- keep deleting the rest of the family
+                pass
 
     def _confirm_delete_all(self) -> None:
         count = len(self._conversations)
