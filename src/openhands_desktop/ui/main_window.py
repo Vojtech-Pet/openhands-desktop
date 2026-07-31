@@ -369,6 +369,7 @@ class MainWindow(QMainWindow):
         self._auto_nudge_count_for_run = 0
         self._auto_nudge_in_flight = False
         self._stuck_prompt_shown_for_run = False
+        self._host_path_correction_sent_for_run = False
         self._last_run_state: RunState | None = None
         self._last_event_at: datetime | None = None
         self._state_generation = 0
@@ -1934,6 +1935,7 @@ class MainWindow(QMainWindow):
             )
         self._auto_nudge_count_for_run = 0
         self._stuck_prompt_shown_for_run = False
+        self._host_path_correction_sent_for_run = False
         if self._controller.conversation_id is None:
             self._remember_user_message(text)
             profile_name = self.model_combo.currentData()
@@ -2498,6 +2500,45 @@ class MainWindow(QMainWindow):
         self.activateWindow()
         QApplication.alert(self)
 
+    _HOST_PATH_PREFIXES = ("/home/", "/Users/", "/root/", "/mnt/", "/media/")
+
+    def _correct_host_path_confusion_if_needed(self, tool_name: str | None, error_text: str) -> None:
+        """Confirmed live 2026-08-01: an agent correctly used
+        workspace_list_folder on a host path the user gave it, then later
+        in the SAME task switched to plain glob on that same host path
+        (which only ever sees /workspace/project), got "not a valid
+        directory" every time, and looped several retries before the
+        watchdog stopped it. Waiting for a repeat before correcting is too
+        slow -- fixes it after the very first occurrence, per direct
+        request ("Po prvej chybe rovnaký chybný call neopakovať" -- don't
+        repeat the same failing call after the first error). Queues a
+        plain message rather than interrupting -- the agent picks it up at
+        its own next step, no risk of cutting off an in-flight call that
+        might have already moved on by itself.
+        """
+        if self._host_path_correction_sent_for_run:
+            return
+        if tool_name not in ("glob", "grep", "file_editor"):
+            return
+        if self._controller is None or self._controller.conversation_id is None:
+            return
+        lowered = error_text.lower()
+        if "not a valid directory" not in lowered and "no such file or directory" not in lowered:
+            return
+        if not any(prefix in error_text for prefix in self._HOST_PATH_PREFIXES):
+            return
+        self._host_path_correction_sent_for_run = True
+        text = (
+            f"That {tool_name} call failed because it was pointed at a host "
+            "filesystem path -- this tool only ever sees /workspace/project, "
+            "it cannot reach a path like the one you just tried, and "
+            "retrying it verbatim will fail the same way every time. Use "
+            "workspace_connect_folder on that exact host path, then "
+            "workspace_list_folder/workspace_read_file to browse it instead."
+        )
+        self._append_log(text, kind="user")
+        self._controller.send_message(text)
+
     async def _handle_stuck(self, reason: str) -> None:
         """Runs after ConversationWatchdog gives up. Confirmed live
         2026-07-31: asking the user to decide *immediately* sometimes raced
@@ -3022,6 +3063,8 @@ class MainWindow(QMainWindow):
             # the actual problem buried inside a collapsed card -- exactly
             # backwards from what the pill is supposed to communicate.
             tool_failed = bool(observation.get("is_error")) or text.startswith("ERROR:")
+            if tool_failed:
+                self._correct_host_path_confusion_if_needed(event.tool_name, text)
             # Always resolve the matching tool_call card (even with no
             # extracted text) -- LogView pairs tool_call/tool_result into one
             # card and flips its status pill from Running on this call, so
