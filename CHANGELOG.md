@@ -2,6 +2,11 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-07-31 — Second independent window; mandatory sub-agent delegation for LocalProject work
+
+- New "New window" action (composer's "⋯" menu): opens a second, fully independent window sharing this process's client/MCP servers, so you can keep working (or just watch) while the first window's conversation is busy. Shutdown is now aware of how many windows are open -- only the last one closing actually tears down the shared servers and checks whether it's safe to unload the model.
+- Added a `project-module-engineer` sub-agent (site-specific extraction playbook, known site patterns, the module contract) and made delegation to it mandatory for any the local project project module task, overriding the general "use subagents only when it genuinely helps" guidance for that specific category.
+
 ## 2026-07-31 — Warn when sending a chat message to a busy conversation
 
 - `send-message` only appends to the conversation's event history -- it does not interrupt an in-flight LLM call, and whether the agent even acts on a new message depends entirely on the model noticing and prioritizing it over what it was already doing. Verified live: a message telling a running agent to "stop, wait for instructions" was recorded in ~0.15s but had zero effect -- the agent kept executing its original plan through several more steps. Sending a message while the conversation is running now shows a note that it's queued, not acted on immediately, and to use Stop first for an actual immediate reaction.
