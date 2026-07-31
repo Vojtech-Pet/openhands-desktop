@@ -116,10 +116,17 @@ class TaskBoardDialog(QDialog):
             """
         )
 
+        self._conversations: list[AppConversation] = []
+
         layout = QVBoxLayout(self)
         header_row = QHBoxLayout()
         header_row.addWidget(QLabel("All conversations on this server, live"))
         header_row.addStretch()
+        self._delete_all_btn = QPushButton("Delete all")
+        self._delete_all_btn.setStyleSheet(f"QPushButton {{ color: {COLOR_DANGER}; }}")
+        self._delete_all_btn.setEnabled(False)
+        self._delete_all_btn.clicked.connect(self._confirm_delete_all)
+        header_row.addWidget(self._delete_all_btn)
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self._reload)
         header_row.addWidget(refresh_btn)
@@ -144,6 +151,8 @@ class TaskBoardDialog(QDialog):
     def _on_loaded(self, conversations: list[AppConversation]) -> None:
         self._list.clear()
         conversations = sorted(conversations, key=lambda c: c.raw.get("updated_at", ""), reverse=True)
+        self._conversations = conversations
+        self._delete_all_btn.setEnabled(bool(conversations))
         if not conversations:
             empty = QListWidgetItem("No conversations on this server yet.")
             self._list.addItem(empty)
@@ -176,4 +185,52 @@ class TaskBoardDialog(QDialog):
                 self._client.delete_conversation(conversation_id),
                 lambda _result: self._reload(),
                 error_title="Failed to delete conversation",
+            )
+
+    def _confirm_delete_all(self) -> None:
+        count = len(self._conversations)
+        if count == 0:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete all conversations",
+            f"Delete all {count} conversation(s) on this server? This can't be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._delete_all_btn.setEnabled(False)
+            # Deleting N conversations one at a time (each a real HTTP round
+            # trip, plus server-side sandbox cleanup) can take a while --
+            # confirmed live 2026-07-31: with no visible feedback in between,
+            # a slow bulk delete looked exactly like nothing had happened.
+            self._list.clear()
+            self._list.addItem(QListWidgetItem(f"Deleting {count} conversation(s)… waiting"))
+            run_async(
+                self,
+                self._delete_all(),
+                self._on_delete_all_done,
+                error_title="Failed to delete all conversations",
+            )
+
+    async def _delete_all(self) -> tuple[int, int]:
+        deleted = 0
+        failed = 0
+        for conversation in self._conversations:
+            try:
+                await self._client.delete_conversation(conversation.id)
+                deleted += 1
+            except Exception:  # noqa: BLE001 -- keep deleting the rest, report the tally after
+                failed += 1
+        return deleted, failed
+
+    def _on_delete_all_done(self, result: tuple[int, int]) -> None:
+        deleted, failed = result
+        self._reload()
+        if failed:
+            QMessageBox.warning(
+                self,
+                "Some deletions failed",
+                f"Deleted {deleted} conversation(s), but {failed} failed -- "
+                "they're still in the list below. Try again, or check the app log for why.",
             )

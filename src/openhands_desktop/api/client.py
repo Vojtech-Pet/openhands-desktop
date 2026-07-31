@@ -373,8 +373,21 @@ class AppServerClient:
     async def search_conversations(self, limit: int = 50) -> list[AppConversation]:
         """Every conversation on the server with its live execution_status/
         sandbox_status, not just what's in the local HistoryStore cache --
-        source of truth for a Mission-Control-style task board."""
-        resp = await self._client.get("/api/v1/app-conversations/search", params={"limit": limit})
+        source of truth for a Mission-Control-style task board.
+
+        `include_sub_conversations=true` is required -- without it, the
+        server only returns top-level conversations and silently omits any
+        Continue-as-Code child (parent_conversation_id set), even while it's
+        actively running (confirmed live 2026-07-31: a Code continuation
+        LM Studio was actively generating for was completely invisible to
+        this call, so every caller that treats an empty/finished-only
+        result as "nothing else running" -- shutdown's model-unload safety
+        check, the VRAM-unload button's safety check, Mission Control --
+        was blind to it)."""
+        resp = await self._client.get(
+            "/api/v1/app-conversations/search",
+            params={"limit": limit, "include_sub_conversations": "true"},
+        )
         resp.raise_for_status()
         return [AppConversation.from_json(item) for item in resp.json().get("items", [])]
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -176,6 +177,20 @@ _TOGGLE_ON_ICON = QIcon(
 # should halt, not keep retrying the same failing pattern.
 _MAX_AUTO_NUDGES_PER_RUN = 1
 
+# See MainWindow._on_state_changed: a status poll and a real, actively
+# streaming ActionEvent/MessageEvent/thinking-delta can race in either
+# order -- the server's own execution_status briefly reads "finished" (or
+# once, "error") between agent steps, a known OpenHands quirk, independent
+# of whether the agent is actually still working. Confirmed live 2026-07-31
+# a purely reactive fix (correct the label only when a new event arrives)
+# wasn't enough: a slightly later poll using that same stale "finished"
+# reading flipped the label right back within a couple seconds, and the
+# duration timer stayed frozen the whole time. Any real event within this
+# many seconds of "now" is treated as proof the conversation is still
+# active, overriding a stale terminal reading regardless of which arrived
+# first.
+_RECENT_ACTIVITY_GRACE_S = 8
+
 STATE_LABELS = {
     RunState.IDLE: ("Idle", "StateIdle"),
     RunState.RUNNING: ("Running…", "StateRunning"),
@@ -185,7 +200,11 @@ STATE_LABELS = {
     # actually succeeded" must never look like the same thing as "paused" or
     # blend into "completed" -- see the design spec's explicit call-out that
     # Completed and Finished-unverified must stay unambiguous at a glance.
-    RunState.FINISHED_UNVERIFIED: ("Finished (unverified)", "StateFinishedUnverified"),
+    # Labeled "Waiting", not "Finished (unverified)" -- the model stopped
+    # producing output without an explicit finish() call, which reads as
+    # done-but-not-confirmed, not as a terminal state; "Waiting" makes clear
+    # it's expecting the user to look and decide what happens next.
+    RunState.FINISHED_UNVERIFIED: ("Waiting", "StateFinishedUnverified"),
     RunState.COMPLETED: ("Completed", "StateCompleted"),
     RunState.STUCK: ("Stuck", "StateError"),
     RunState.ERROR: ("Error", "StateError"),
@@ -307,11 +326,32 @@ class MainWindow(QMainWindow):
         self._ensure_default_model_settings()
         self._profiles_by_name: dict[str, object] = {}
         self._history = history_store or HistoryStore()
+        # Serializes sidebar status writes: state_changed can fire in quick
+        # succession (e.g. ERROR then a recovery back to RUNNING/COMPLETED),
+        # each write opens its own DB connection with no ordering guarantee
+        # across them, and a slower *earlier* write finishing after a faster
+        # *later* one could silently leave the sidebar stuck on a stale
+        # status (confirmed live 2026-07-31: an error the agent recovered
+        # from left it frozen on a terminal status even though the agent
+        # kept working and finished normally). The lock forces writes to
+        # apply in dispatch order.
+        self._history_write_lock = asyncio.Lock()
+        self._sidebar_refresh_seq = 0
         self._presets = PresetStore()
         self._preset_list: list[Preset] = []
         self._pending_model: str | None = None
         self._pending_title: str | None = None
         self._current_agent_type: str | None = None
+        # Tracks *which conversation* is a finished Plan waiting to hand off
+        # to Code, independent of _current_agent_type -- confirmed live
+        # 2026-07-31: with Auto-continue on, _continue_as_code_async sets
+        # _current_agent_type = "default" for the *new* Code conversation
+        # before the old Plan controller is actually torn down, so a late
+        # state_changed still arriving for the old (still-attached) Plan
+        # conversation read agent_type as "default" and showed plain
+        # "Finished" instead of "Waiting to continue as Code". Keyed by
+        # conversation_id so it survives that kind of mutation elsewhere.
+        self._plan_waiting_conversation_id: str | None = None
         self._conversation_started_at: datetime | None = None
         self._duration_frozen = False
         self._auto_continue_triggered = False
@@ -324,6 +364,7 @@ class MainWindow(QMainWindow):
         self._auto_nudge_in_flight = False
         self._stuck_prompt_shown_for_run = False
         self._last_run_state: RunState | None = None
+        self._last_event_at: datetime | None = None
         self._tool_call_count = 0
         self._estimated_context_chars = 0
         self._real_used_tokens = 0
@@ -336,6 +377,7 @@ class MainWindow(QMainWindow):
         self._pending_terminal_action_ts: datetime | None = None
         self._recent_user_messages: list[str] = []
         self._is_resuming = False
+        self._continuing_from_plan_id: str | None = None
         self._conversation_starting = False
         self._model_switching = False
         self._shutdown_complete = False
@@ -445,6 +487,14 @@ class MainWindow(QMainWindow):
         self.model_combo.currentIndexChanged.connect(self._on_model_selection_changed)
         model_text_col.addWidget(self.model_combo)
         model_chip_row.addLayout(model_text_col, 1)
+        self.unload_model_btn = QPushButton("Unload")
+        self.unload_model_btn.setToolTip(
+            "Unload the model currently loaded in LM Studio to free up VRAM. "
+            "Only runs if no conversation is actively running."
+        )
+        self.unload_model_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.unload_model_btn.clicked.connect(self._on_unload_model_clicked)
+        model_chip_row.addWidget(self.unload_model_btn)
         top_bar_layout.addWidget(model_chip)
 
         thinking_chip = QWidget()
@@ -859,6 +909,8 @@ class MainWindow(QMainWindow):
         controller.token_usage_changed.connect(self._on_token_usage_changed)
         self._controller = controller
         self._auto_continue_triggered = False
+        self._plan_waiting_conversation_id = None
+        self._last_event_at = None
         if self._auto_supervise:
             self._watchdog = ConversationWatchdog(controller, on_step=self._on_watchdog_step)
 
@@ -1341,21 +1393,27 @@ class MainWindow(QMainWindow):
 
     async def _load_profiles_async(self) -> None:
         try:
-            profiles, active_profile = await self._client.list_llm_profiles()
+            profiles, _active_profile = await self._client.list_llm_profiles()
         except Exception as exc:  # noqa: BLE001
             self._on_error(f"Failed to load LLM profiles: {exc}")
             return
         self._profiles_by_name = {p.name: p for p in profiles}
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
+        # Starts on this placeholder, not the remembered/server-active
+        # profile -- 2026-07-31: the launcher script used to force-load the
+        # Plan model on every single launch regardless of what the user was
+        # about to pick, which this combo defaulting to "already selected"
+        # matched visually even after that eager load was removed (nothing
+        # is actually loaded yet, but the chip claimed a specific profile
+        # was current). _check_loaded_model_async right below corrects this
+        # to the real profile if something genuinely is already loaded;
+        # otherwise it's a real "nothing chosen yet" until the user picks
+        # Plan/Code or a model, which is what actually triggers a load.
+        self.model_combo.addItem("No model", userData=None)
         for p in profiles:
             self.model_combo.addItem(icon("model-ai"), f"{p.name} ({p.model})", userData=p.name)
-        remembered = self._settings.value("last_profile_name")
-        target = remembered if remembered in self._profiles_by_name else active_profile
-        if target is not None:
-            index = self.model_combo.findData(target)
-            if index >= 0:
-                self.model_combo.setCurrentIndex(index)
+        self.model_combo.setCurrentIndex(0)
         self.model_combo.blockSignals(False)
         self._update_model_status_label()
         self._refresh_thinking_toggles()
@@ -1453,12 +1511,29 @@ class MainWindow(QMainWindow):
                 extra_config=config,
             )
             await self._client.activate_profile(profile_name)
+            self._push_llm_toggle_live(config, extra_body)
         except Exception as exc:  # noqa: BLE001
             self._on_error(f"Failed to save thinking settings for {profile_name}: {exc}")
         finally:
             if profile_name == self.model_combo.currentData():
                 self.enable_thinking_check.setEnabled(True)
                 self.preserve_thinking_check.setEnabled(True)
+
+    def _push_llm_toggle_live(self, config: dict, extra_body: dict) -> None:
+        """Applies a just-saved Thinking/Keep toggle to the conversation
+        that's actually running right now, if any -- otherwise it would only
+        take effect the next time a conversation is started (see
+        conversation_controller.switch_llm's usage_id note for why a plain
+        re-POST of the same profile wouldn't do anything by itself)."""
+        if self._controller is None or self._controller.conversation_id is None:
+            return
+        if self._controller.llm_model != config.get("model"):
+            return  # a different model is actually running -- nothing to push
+        live_config = dict(config)
+        live_config["litellm_extra_body"] = extra_body
+        live_config["usage_id"] = f"agent-live-{int(time.time() * 1000)}"
+        self._controller.switch_llm(live_config)
+        self._append_log("Applied the Thinking/Keep setting to the running conversation.", kind="system")
 
     def _update_thinking_toggle_icons(self) -> None:
         self.enable_thinking_check.setIcon(
@@ -1571,6 +1646,53 @@ class MainWindow(QMainWindow):
                 "Add a profile for it in Settings -> LLM (Autodetect can fill the Model field)."
             )
             _repolish(self.model_status_label)
+
+    def _on_unload_model_clicked(self) -> None:
+        asyncio.ensure_future(self._unload_model_async())
+
+    async def _unload_model_async(self) -> None:
+        running_conversation_id = (
+            self._controller.conversation_id
+            if self._controller is not None and self._last_run_state == RunState.RUNNING
+            else None
+        )
+        try:
+            conversations = await self._client.search_conversations(limit=50)
+            other_conversations_running = any(
+                c.execution_status is not None
+                and c.execution_status.value == "running"
+                and c.id != running_conversation_id
+                for c in conversations
+            )
+        except Exception:  # noqa: BLE001 -- best effort; refuse to unload if we can't confirm it's safe
+            other_conversations_running = True
+        if running_conversation_id is not None or other_conversations_running:
+            QMessageBox.information(
+                self,
+                "Can't unload model",
+                "A conversation is still running and depends on the loaded model. "
+                "Stop it first, then try again.",
+            )
+            return
+        self.unload_model_btn.setEnabled(False)
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "/home/vojtech/.lmstudio/bin/lms",
+                "unload",
+                "--all",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(process.wait(), timeout=30.0)
+        except (OSError, asyncio.TimeoutError) as exc:
+            self._on_error(f"Could not unload the model: {exc}")
+        finally:
+            self.unload_model_btn.setEnabled(True)
+        self.model_combo.blockSignals(True)
+        self.model_combo.setCurrentIndex(0)  # "No model"
+        self.model_combo.blockSignals(False)
+        self._update_model_status_label()
+        self._append_log("Model unloaded to free VRAM.", kind="system")
 
     def _selected_model(self) -> str | None:
         name = self.model_combo.currentData()
@@ -1815,41 +1937,107 @@ class MainWindow(QMainWindow):
     # CREATE THE PLAN... the code agent will execute curl requests"). Stating
     # this upfront instead of letting it discover it the hard way.
     _PLAN_MODE_NOTE = (
-        "\n\nYou are running in Plan mode for this conversation. Your job is "
-        "to investigate and produce a plan (a PLAN.md), not to implement "
-        "anything -- a separate Code agent, with full read/write and "
-        "terminal access, will execute your plan afterward.\n"
-        "What you have: glob, grep, reading files, the planning file editor, "
-        "think, finish, and the workspace_connect_folder/list_folder/"
-        "read_file tools for host paths the user mentions.\n"
-        "What you do NOT have: a terminal, the ability to run shell commands "
-        "(curl, git, npm, etc.), or write access to the project's own files. "
-        "If a skill/tool's own description says it runs commands or reaches "
-        "the network, that capability is not actually available to you in "
-        "this mode regardless of what invoking it appears to do -- do not "
-        "hunt for a workaround. Instead, write the concrete step you'd need "
-        "(e.g. \"run curl against X to find the API shape\") into the plan "
-        "for the Code agent to execute."
+        "\n\n=== PLAN MODE -- READ THIS BEFORE YOUR FIRST TOOL CALL ===\n"
+        "You are a Planning agent. Your ONLY output is a plan (PLAN.md). "
+        "You do not implement, fix, install, run, download, or configure "
+        "anything, ever, in this conversation. A separate Code agent, with "
+        "full read/write and terminal access, executes your plan afterward "
+        "-- that is a fact about this deployment, not a suggestion.\n\n"
+        "TOOLS YOU HAVE (this is the complete list -- nothing else is "
+        "available no matter what a tool/skill's name or description "
+        "implies): glob, grep, reading files, the planning file editor "
+        "(PLAN.md only), think, finish, and workspace_connect_folder/"
+        "list_folder/read_file for host paths the user mentions.\n\n"
+        "YOU DO NOT HAVE, under any circumstance, in this mode: a terminal, "
+        "shell/bash access, curl/wget/git/npm/pip or any other command, "
+        "network access, the ability to write or edit any file except "
+        "PLAN.md, or the ability to install/run/download/execute anything. "
+        "This is a hard platform restriction, not a permission you could "
+        "obtain by finding the right tool or skill.\n\n"
+        "If you are tempted to reach for a skill (e.g. one named \"ssh\", "
+        "\"deploy\", \"docker\", or similar) because it sounds like it could "
+        "give you a missing capability: it cannot. Skills in Plan mode are "
+        "documentation lookups only -- invoking one returns text, it does "
+        "not grant you a terminal or network access, and calling it again, "
+        "or calling a different skill, will not change that. If a skill "
+        "call's result doesn't literally give you file/plan content to read "
+        "or write, stop -- you are not going to get a different outcome by "
+        "retrying or trying another skill. This exact mistake has happened "
+        "before (an agent with no terminal called the \"ssh\" skill six "
+        "times in a row hoping a different result would appear -- it never "
+        "does, the skill only returns static documentation).\n\n"
+        "The correct move whenever you find yourself wanting to actually DO "
+        "something (run a command, check something live, install a "
+        "dependency, test an API) is always the same: do not attempt it, do "
+        "not search for a way to attempt it -- write the concrete step into "
+        "PLAN.md for the Code agent to execute later (e.g. \"run `curl -s "
+        "https://api.example.com/schema` to confirm the response shape\"). "
+        "That is a complete, correct action in Plan mode, not a fallback."
     )
 
     _CODE_MODE_NOTE = (
-        "\n\nYou are running in Code mode for this conversation. Your job is "
-        "to actually implement the change, not just describe it -- read/"
-        "write files, run commands, and verify your work before finishing.\n"
-        "What you have: a terminal (Bash/shell commands, installing "
-        "dependencies, running tests/builds, git), the file editor (create/"
-        "edit/view files), browser tools, a task tracker, think, finish, and "
-        "the workspace_connect_folder/list_folder/read_file/write_file tools "
-        "for host paths the user mentions (write_file needs a separate "
-        "confirmation per call).\n"
-        "If a parent Plan conversation's plan (e.g. .agents_tmp/PLAN.md) is "
-        "part of this conversation's history, treat its discovery steps as "
-        "genuinely unverified -- run them for real (the curl/API-probing "
-        "steps it deferred to you) rather than assuming its assumptions "
-        "were correct."
+        "\n\n=== CODE MODE -- READ THIS BEFORE YOUR FIRST TOOL CALL ===\n"
+        "You are a Code agent. Your job is to actually IMPLEMENT the "
+        "change -- edit real files, run real commands, and verify the "
+        "result actually works.\n\n"
+        "TOOLS YOU HAVE: a terminal (Bash/shell commands, installing "
+        "dependencies, running tests/builds, git), the file editor "
+        "(create/edit/view files), browser tools, a task tracker, "
+        "switch_llm, think, finish, and workspace_connect_folder/"
+        "list_folder/read_file/write_file for host paths the user mentions "
+        "(write_file needs a separate confirmation per call).\n\n"
+        "Before calling finish: confirm the actual change exists on disk "
+        "(read the file back, or run the test/build) -- do not call finish "
+        "based on believing a previous step succeeded without checking."
     )
 
-    def _custom_instructions(self, agent_type: str | None = None) -> str | None:
+    # Only appended when this Code conversation was actually started via
+    # Continue-as-Code from a Plan conversation -- appending it to a plain,
+    # from-scratch Code conversation would be actively wrong (there is no
+    # PLAN.md, nothing "already happened in a separate Plan conversation").
+    _CODE_MODE_CONTINUED_FROM_PLAN_NOTE = (
+        "\n\nTHIS CONVERSATION WAS CONTINUED FROM A PLAN (you were told to "
+        "continue implementing a plan). Describing what should be done, or "
+        "producing another plan, is not an acceptable outcome here; that "
+        "already happened in the separate Plan conversation before this "
+        "one.\n\n"
+        "Your sandbox is a brand-new, separate container from the one the "
+        "Plan agent used -- it does NOT inherit whatever host folder the "
+        "Plan agent had connected. Concretely, this means "
+        "/workspace/project will be EMPTY except for .agents_tmp/PLAN.md "
+        "and a bare, commit-less .git -- that is expected, not an error, "
+        "and not a sign the project is missing. Do these two things, in "
+        "order, before writing any code:\n"
+        "  1. Read .agents_tmp/PLAN.md in full if you haven't already -- "
+        "it already has the objective, approach, and concrete steps. Do "
+        "not re-derive or second-guess it into a new plan.\n"
+        "  2. Call workspace_connect_folder with the real host project "
+        "path (stated in this message, or in the plan/earlier conversation "
+        "if not) so you can actually read and modify the real files. An "
+        "empty /workspace/project is a signal to connect the folder, not "
+        "a signal to explore unrelated things (curl, browser, guessing at "
+        "URLs) looking for something to do -- that has happened before and "
+        "wasted an entire run without producing any real change.\n\n"
+        "If the plan includes discovery steps it explicitly deferred to "
+        "you (e.g. \"run curl against X to confirm the response shape\"), "
+        "treat those as genuinely unverified -- run them for real rather "
+        "than assuming the plan's assumptions were correct.\n\n"
+        "Override for this conversation specifically: your base "
+        "instructions elsewhere say that when you hit a major issue while "
+        "executing a plan, you should \"propose a new plan and confirm "
+        "with the user\" instead of working around it. That does NOT apply "
+        "here. You already have a concrete, user-approved plan in "
+        ".agents_tmp/PLAN.md -- an empty /workspace/project, a missing "
+        "dependency, or a step that needs adjusting is an implementation "
+        "detail to solve and keep going (reconnect the folder, install the "
+        "dependency, adapt the step), not a reason to stop and write "
+        "another plan. Only stop and ask (via ask_user_question, not by "
+        "drafting a new plan document) if the issue reveals the plan's "
+        "actual approach is wrong at a level only the user can decide -- "
+        "not for ordinary setup/implementation friction."
+    )
+
+    def _custom_instructions(self, agent_type: str | None = None, *, continued_from_plan: bool = False) -> str | None:
         """Custom agent instructions, passed per-conversation.
 
         Settings -> Agent writes these to
@@ -1866,6 +2054,8 @@ class MainWindow(QMainWindow):
             text = text + self._PLAN_MODE_NOTE
         elif agent_type == "default":
             text = text + self._CODE_MODE_NOTE
+            if continued_from_plan:
+                text = text + self._CODE_MODE_CONTINUED_FROM_PLAN_NOTE
         return text or None
 
     async def _load_custom_instructions(self) -> None:
@@ -1902,11 +2092,31 @@ class MainWindow(QMainWindow):
             # once status polling picks up the real current state.
             self._is_resuming = False
             return
+        if self._continuing_from_plan_id is not None:
+            # Continue-as-Code's new conversation_id is a different backend
+            # id (parent_conversation_id links it to the Plan one) -- swap
+            # the Plan row's id in place instead of inserting a second row,
+            # so the sidebar shows one entry for the whole task instead of
+            # two that both end up showing the same thing.
+            plan_id = self._continuing_from_plan_id
+            self._continuing_from_plan_id = None
+            asyncio.ensure_future(self._replace_history_id_and_refresh(plan_id, conversation_id))
+            return
         asyncio.ensure_future(self._record_and_refresh(conversation_id))
 
     async def _record_and_refresh(self, conversation_id: str) -> None:
         await self._history.record_new(
             conversation_id, llm_model=self._pending_model, title=self._pending_title
+        )
+        await self._refresh_sidebar_history_async()
+
+    async def _write_history_status(self, conversation_id: str, status: str) -> None:
+        async with self._history_write_lock:
+            await self._history.update_status(conversation_id, status)
+
+    async def _replace_history_id_and_refresh(self, old_conversation_id: str, new_conversation_id: str) -> None:
+        await self._history.replace_id(
+            old_conversation_id, new_conversation_id, llm_model=self._pending_model, title=self._pending_title
         )
         await self._refresh_sidebar_history_async()
 
@@ -1922,6 +2132,10 @@ class MainWindow(QMainWindow):
         self.duration_label.setText(text)
 
     def _on_state_changed(self, state: RunState) -> None:
+        if state in (RunState.ERROR, RunState.FINISHED_UNVERIFIED) and self._last_event_at is not None:
+            elapsed = (datetime.now() - self._last_event_at).total_seconds()
+            if elapsed < _RECENT_ACTIVITY_GRACE_S:
+                state = RunState.RUNNING
         self._last_run_state = state
         if state == RunState.ERROR:
             self._notify_needs_attention()
@@ -1933,27 +2147,64 @@ class MainWindow(QMainWindow):
             self._duration_frozen = True
         elif self._duration_frozen and state == RunState.RUNNING:
             self._duration_frozen = False
-        label, style_name = STATE_LABELS.get(state, (str(state), ""))
+        # Plan -> Act handoff (borrowed from Claude Code's plan mode / Roo
+        # Code's Orchestrator): once a Plan conversation reaches a terminal
+        # state, offer to hand its output to a fresh Code conversation
+        # instead of the user copying it over by hand. Computed before the
+        # label below so it can override what gets shown -- confirmed live
+        # 2026-07-31: showing "Finished (unverified)" here was misleading,
+        # since the Plan conversation isn't actually done, it's waiting to
+        # hand off to Code (and reads as a separate, unrelated, finished
+        # conversation in the sidebar rather than one step of one task).
+        current_conversation_id = self._controller.conversation_id if self._controller is not None else None
+        # Continue-as-Code already having run for this conversation is only
+        # tracked in memory (_current_agent_type/_plan_waiting_conversation_id)
+        # -- lost on reattach (e.g. after an app restart), which then showed
+        # plain "Finished" for a Plan conversation that had *already* been
+        # handed off, instead of either "Waiting" or anything reflecting
+        # that reality (confirmed live 2026-07-31). The server's own
+        # sub_conversation_ids is durable and authoritative for "has this
+        # already been continued", independent of what this window
+        # happens to remember.
+        already_continued = bool(self._controller.sub_conversation_ids) if self._controller is not None else False
+        plan_finished = (
+            not already_continued
+            and (self._current_agent_type == "plan" or current_conversation_id == self._plan_waiting_conversation_id)
+            and state in (RunState.COMPLETED, RunState.FINISHED_UNVERIFIED)
+        )
+        if plan_finished:
+            self._plan_waiting_conversation_id = current_conversation_id
+        if plan_finished:
+            label, style_name = "Waiting to continue as Code", "StateWarning"
+        elif already_continued and state in (RunState.COMPLETED, RunState.FINISHED_UNVERIFIED):
+            label, style_name = "Continued as Code", "StateWarning"
+        else:
+            label, style_name = STATE_LABELS.get(state, (str(state), ""))
         self.state_label.setText(label)
         self.state_label.setObjectName(style_name)
         self.state_label.setToolTip(
-            "Agent finished without an explicit finish confirmation from the model."
-            if state == RunState.FINISHED_UNVERIFIED
-            else ""
+            "The plan is done, but the task isn't -- click Continue as Code (or "
+            "enable Auto-continue) to hand it off and actually implement it."
+            if plan_finished
+            else (
+                "A Code agent was already started from this plan (open it from "
+                "Conversations/Mission Control to see its progress)."
+                if already_continued and state in (RunState.COMPLETED, RunState.FINISHED_UNVERIFIED)
+                else (
+                    "Agent finished without an explicit finish confirmation from the model."
+                    if state == RunState.FINISHED_UNVERIFIED
+                    else ""
+                )
+            )
         )
         _repolish(self.state_label)
         if self._controller is not None and self._controller.conversation_id is not None:
             asyncio.ensure_future(
-                self._history.update_status(self._controller.conversation_id, state.name)
+                self._write_history_status(
+                    self._controller.conversation_id,
+                    "WAITING_TO_CONTINUE" if plan_finished else state.name,
+                )
             )
-        # Plan -> Act handoff (borrowed from Claude Code's plan mode / Roo
-        # Code's Orchestrator): once a Plan conversation reaches a terminal
-        # state, offer to hand its output to a fresh Code conversation
-        # instead of the user copying it over by hand.
-        plan_finished = self._current_agent_type == "plan" and state in (
-            RunState.COMPLETED,
-            RunState.FINISHED_UNVERIFIED,
-        )
         self.continue_as_code_btn.setVisible(plan_finished)
         if plan_finished and self.auto_continue_as_code_check.isChecked() and not self._auto_continue_triggered:
             self._auto_continue_triggered = True
@@ -2125,6 +2376,22 @@ class MainWindow(QMainWindow):
         if self._controller is None or self._controller.conversation_id is None:
             return
         parent_id = self._controller.conversation_id
+        # The Plan conversation's sidebar entry was left showing
+        # "WAITING_TO_CONTINUE" forever once Code actually started --
+        # nothing ever moved it off that status. Continuing means it's
+        # running now (as the Code conversation, which is the whole point
+        # of "waiting to continue"), so reflect that immediately rather
+        # than only updating the *new* conversation's own history entry.
+        asyncio.ensure_future(self._write_history_status(parent_id, RunState.RUNNING.name))
+        # Disconnect + stop the OLD (Plan) controller now, before the
+        # potentially several-second-long model-switch await below -- its
+        # status-polling loop was still live during that gap and could
+        # deliver one more stray state_changed(FINISHED) for parent_id,
+        # overwriting the RUNNING write above and leaving the sidebar
+        # stuck showing "Finished" even while the Code agent kept working
+        # (confirmed live 2026-07-31). _new_controller() disconnects it.
+        self._continuing_from_plan_id = parent_id
+        self._new_controller()
         default_code_model = self._settings.value("default_code_model_name")
         if default_code_model:
             self.model_combo.blockSignals(True)
@@ -2154,7 +2421,6 @@ class MainWindow(QMainWindow):
         self.state_label.setObjectName("")
         self.state_label.setToolTip("")
         _repolish(self.state_label)
-        self._new_controller()
         self.log.clear()
         self.stack.setCurrentWidget(self.log)
         self._append_log(f"[continuing plan from conversation {parent_id} as a Code agent…]")
@@ -2166,11 +2432,50 @@ class MainWindow(QMainWindow):
         self._pending_title = "Continued from plan"
         self._controller.start_new(
             llm_model=model,
-            initial_message="Continue implementing the plan from the previous conversation.",
+            initial_message=self._continue_as_code_initial_message(),
             agent_type="default",
             parent_conversation_id=parent_id,
-            system_message_suffix=self._custom_instructions("default"),
+            system_message_suffix=self._custom_instructions("default", continued_from_plan=True),
         )
+
+    def _continue_as_code_initial_message(self) -> str:
+        """Confirmed live 2026-07-31: the Code sandbox is a brand-new,
+        separate container -- it does NOT inherit the Plan sandbox's
+        connected host folder. A Code agent that never re-runs
+        workspace_connect_folder ends up with an empty /workspace/project
+        (just its own untouched .agents_tmp/PLAN.md and a bare, commit-less
+        .git) and, finding nothing real to work with, wandered off into
+        curl/browser exploration instead of implementing anything -- even
+        though it HAD already found and read PLAN.md by that point. Spelling
+        out both steps explicitly (read the plan, then reconnect the real
+        project folder) closes that gap instead of assuming the agent will
+        infer it from an empty directory.
+        """
+        text = (
+            "Continue implementing the plan from the previous conversation. "
+            "First, read .agents_tmp/PLAN.md in full -- it already contains "
+            "the objective, approach, and implementation steps; do not "
+            "recreate or re-derive it. "
+        )
+        root = self._workspace_server.root_display if self._workspace_server.connected else ""
+        if root:
+            text += (
+                f"Second, call workspace_connect_folder with \"{root}\" -- "
+                "this is a new sandbox and does not have that folder "
+                "connected yet, even though the plan was written from it; "
+                "/workspace/project itself is empty except for the plan "
+                "file. Then implement the plan's steps against the real "
+                "project via the workspace_* tools (or by copying the "
+                "relevant files into /workspace/project first, if you need "
+                "the terminal/file_editor tools directly on them)."
+            )
+        else:
+            text += (
+                "No host folder was connected during planning -- if the "
+                "plan references files outside /workspace/project, connect "
+                "the right folder with workspace_connect_folder first."
+            )
+        return text
 
     # --- history / sidebar -------------------------------------------------------
 
@@ -2405,7 +2710,23 @@ class MainWindow(QMainWindow):
         asyncio.ensure_future(self._refresh_sidebar_history_async())
 
     async def _refresh_sidebar_history_async(self) -> None:
+        # Confirmed live 2026-07-31: deleting conversations and starting a
+        # new one in close succession triggers several of these
+        # concurrently (delete's own refresh, plus the new conversation's
+        # record_new-then-refresh) -- each does its own independent DB read
+        # + sidebar update, and nothing guaranteed they'd finish in the
+        # order they started. Whichever finished *last* simply overwrote
+        # the sidebar with its own snapshot, which could be one that read
+        # the DB before the newer conversation's insert had landed --
+        # dropping the brand new entry from view even though it was
+        # actually recorded. This sequence guard makes only the
+        # most-recently-*requested* refresh ever allowed to actually apply,
+        # so a slower, earlier-started one can't clobber a newer result.
+        self._sidebar_refresh_seq += 1
+        my_seq = self._sidebar_refresh_seq
         records = await self._history.list_recent()
+        if my_seq != self._sidebar_refresh_seq:
+            return
         self.sidebar.set_records(records)
 
     # --- event rendering ----------------------------------------------------------
@@ -2415,6 +2736,17 @@ class MainWindow(QMainWindow):
 
     def _on_events(self, events: list[NormalizedEvent]) -> None:
         for event in events:
+            if event.kind in (
+                EventKind.ACTION, EventKind.OBSERVATION, EventKind.MESSAGE, EventKind.STREAMING_DELTA,
+            ):
+                # Timestamped so _on_state_changed can tell a genuinely idle
+                # conversation apart from one that's actively producing
+                # events but happened to be read as "finished"/"error" by an
+                # unluckily-timed status poll -- see the grace-window note
+                # there for why a one-shot correction here wasn't enough
+                # (confirmed live 2026-07-31: a later poll using
+                # still-stale server data flipped the label right back).
+                self._last_event_at = datetime.now()
             self._render_event(event)
 
     def _render_event(self, event: NormalizedEvent) -> None:

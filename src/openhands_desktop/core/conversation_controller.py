@@ -47,6 +47,8 @@ class ConversationController(QObject):
         self._ws: ConversationWebSocketClient | None = None
         self._sandbox: SandboxConversationClient | None = None
         self.conversation_id: str | None = None
+        self.llm_model: str | None = None
+        self.sub_conversation_ids: list[str] = []
         self._status_poll_task: asyncio.Task | None = None
         self._lifecycle_task: asyncio.Task | None = None
         self._reconnect_task: asyncio.Task | None = None
@@ -167,6 +169,8 @@ class ConversationController(QObject):
         """
         self._syncing = True
         self._sync_buffer = []
+        self.llm_model = conversation.llm_model
+        self.sub_conversation_ids = list(conversation.raw.get("sub_conversation_ids") or [])
         try:
             if self._ws is not None:
                 await self._ws.stop()
@@ -341,6 +345,20 @@ class ConversationController(QObject):
             await self._sandbox.condense()
         except Exception as exc:  # noqa: BLE001
             self.compact_finished.emit(False, str(exc))
+
+    def switch_llm(self, llm_config: dict) -> None:
+        """Applies an LLM config change (e.g. a chat_template_kwargs toggle)
+        to this conversation immediately instead of only the next one."""
+        if self._sandbox is None:
+            return
+        self._spawn(self._switch_llm(llm_config))
+
+    async def _switch_llm(self, llm_config: dict) -> None:
+        assert self._sandbox is not None
+        try:
+            await self._sandbox.switch_llm(llm_config)
+        except Exception as exc:  # noqa: BLE001
+            self.error_occurred.emit(f"Could not apply the setting to the live conversation: {exc}")
             return
         self.compact_finished.emit(True, "History condensation completed")
 
@@ -369,6 +387,7 @@ class ConversationController(QObject):
                         reported_error = True
                     await asyncio.sleep(STATUS_POLL_INTERVAL_S)
                     continue
+                self.sub_conversation_ids = list(conversation.raw.get("sub_conversation_ids") or [])
                 state = self._completion.resolve(conversation.execution_status)
                 if state != last_state:
                     last_state = state

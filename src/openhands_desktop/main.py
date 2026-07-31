@@ -30,7 +30,11 @@ def _acquire_single_instance() -> QLocalServer | None:
     """
     probe = QLocalSocket()
     probe.connectToServer(_SINGLE_INSTANCE_KEY)
-    if probe.waitForConnected(200):
+    # 50ms, not 200ms: a Unix domain socket with no listener refuses the
+    # connection almost instantly, so this is generous headroom, not a
+    # tight race -- and it's the one synchronous wait that blocks the
+    # window from appearing at all, on every single normal launch.
+    if probe.waitForConnected(50):
         probe.disconnectFromServer()
         return None
 

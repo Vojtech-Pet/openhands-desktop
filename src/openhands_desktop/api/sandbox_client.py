@@ -44,3 +44,22 @@ class SandboxConversationClient:
         resp = await self._client.post(f"{self._conversation_url}/condense")
         resp.raise_for_status()
         return True
+
+    async def switch_llm(self, llm_config: dict) -> bool:
+        """POST {conversation_url}/switch_llm: swaps the agent's live LLM
+        object for the one in `llm_config` (a full serialized LLM, e.g. from
+        GET /settings/profiles/{name}). Used to apply an LLM setting (like a
+        chat_template_kwargs toggle) to an already-running conversation
+        instead of only the next one.
+
+        `usage_id` must NOT be the currently active lane's id ("agent" for
+        the main agent LLM) -- the sandbox's registry treats a hit on an
+        existing usage_id as "already have this one" and silently reuses the
+        stale cached object instead of applying the new config. Callers must
+        pass a fresh, unique usage_id (see main_window._push_llm_toggle_live).
+        """
+        resp = await self._client.post(
+            f"{self._conversation_url}/switch_llm", json={"llm": llm_config}
+        )
+        resp.raise_for_status()
+        return True

@@ -72,6 +72,26 @@ class HistoryStore:
             )
             await db.commit()
 
+    async def replace_id(
+        self, old_conversation_id: str, new_conversation_id: str, *, llm_model: str | None, title: str | None
+    ) -> None:
+        """Continue-as-Code starts a genuinely new backend conversation
+        (parent_conversation_id links it to the Plan one, but it's a
+        separate id) -- swapping the existing Plan row's id in place instead
+        of inserting a second row keeps the sidebar showing one entry for
+        the whole Plan-then-Code task instead of two identical-looking ones.
+        """
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                """
+                UPDATE conversations
+                SET conversation_id = ?, llm_model = ?, title = ?, last_status = NULL
+                WHERE conversation_id = ?
+                """,
+                (new_conversation_id, llm_model, title, old_conversation_id),
+            )
+            await db.commit()
+
     async def delete(self, conversation_id: str) -> None:
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute(
