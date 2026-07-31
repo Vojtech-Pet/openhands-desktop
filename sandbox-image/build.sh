@@ -9,11 +9,26 @@
 set -euo pipefail
 
 REPO="openhands-desktop/agent-server"
-TAG="1.36.0-python"
+TAG="1.37.1-python"
 cd "$(dirname "$0")"
 
 echo "==> building ${REPO}:${TAG}"
 docker build -t "${REPO}:${TAG}" .
+
+echo
+echo "==> testing DNS inside ${REPO}:${TAG}"
+if docker run --rm --entrypoint python "${REPO}:${TAG}" - <<'PY'
+import socket
+socket.getaddrinfo("www.google.com", 443)
+print("DNS OK")
+PY
+then
+    echo "==> sandbox DNS works"
+else
+    echo "==> sandbox DNS failed"
+    echo "    Run ../scripts/fix_docker_dns.sh to diagnose it."
+    echo "    Run ../scripts/fix_docker_dns.sh --apply to install fallback Docker DNS servers."
+fi
 
 echo
 echo "==> built. To use it, the openhands-app container needs:"

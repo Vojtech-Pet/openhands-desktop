@@ -15,7 +15,7 @@
 #
 # Build and point the app-server at it:
 #   ./build.sh
-FROM ghcr.io/openhands/agent-server:1.36.0-python
+FROM ghcr.io/openhands/agent-server:1.37.1-python
 
 # Create ~/.openhands owned by the runtime user BEFORE copying into it.
 # COPY --chown only sets ownership on what it copies; the parent directories

@@ -422,7 +422,7 @@ class AppServerClient:
 
         resp = await self._client.post(
             f"/api/v1/app-conversations/{conversation_id}/send-message",
-            json={"role": "user", "content": content},
+            json={"role": "user", "content": content, "run": True},
         )
         resp.raise_for_status()
 

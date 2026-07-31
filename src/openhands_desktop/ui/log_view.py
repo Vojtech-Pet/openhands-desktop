@@ -170,12 +170,14 @@ class LogView(QScrollArea):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWidgetResizable(True)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setFrameShape(QScrollArea.Shape.NoFrame)
         self.setStyleSheet("QScrollArea { background: transparent; border: none; }")
 
         container = QWidget()
         container.setStyleSheet("background: transparent;")
+        container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._layout = QVBoxLayout(container)
         self._layout.setContentsMargins(SPACE_SM, SPACE_SM, SPACE_SM, SPACE_SM)
         self._layout.setSpacing(SPACE_MD)
@@ -336,6 +338,7 @@ class LogView(QScrollArea):
 
         row = QWidget()
         row.setStyleSheet("background: transparent;")
+        row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(0, 0, 0, 0)
         row_layout.setSpacing(SPACE_XS)
@@ -383,6 +386,7 @@ class LogView(QScrollArea):
     def _new_card(self, border_color: str) -> tuple[QFrame, QVBoxLayout]:
         card = QFrame()
         card.setObjectName("TimelineCard")
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         card.setStyleSheet(
             f"#TimelineCard {{ background-color: #101A2B; border: 1px solid {border_color}; "
             f"border-radius: {RADIUS_MD}px; }}"
@@ -404,7 +408,7 @@ class LogView(QScrollArea):
         label.setTextFormat(Qt.TextFormat.PlainText)
         label.setWordWrap(True)
         label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         family = "font-family: 'JetBrains Mono', 'Fira Code', monospace;" if monospace else ""
         label.setStyleSheet(f"background: transparent; font-size: 13px; color: {color}; {family}")
         return label
@@ -651,6 +655,7 @@ class LogView(QScrollArea):
     def _group_sub_card(self, border_color: str) -> tuple[QFrame, QVBoxLayout]:
         frame = QFrame()
         frame.setObjectName("GroupSubCard")
+        frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         frame.setStyleSheet(
             f"#GroupSubCard {{ background-color: rgba(255, 255, 255, 10); "
             f"border: 1px solid {border_color}; border-radius: {RADIUS_MD}px; }}"
@@ -852,6 +857,12 @@ class LogView(QScrollArea):
 
     def resizeEvent(self, event) -> None:  # noqa: N802 -- Qt override
         super().resizeEvent(event)
+        widget = self.widget()
+        if widget is not None:
+            widget.setMinimumWidth(self.viewport().width())
+            widget.updateGeometry()
+            if widget.layout() is not None:
+                widget.layout().invalidate()
         margin = 14
         self._scroll_to_bottom_btn.move(
             self.width() - self._scroll_to_bottom_btn.width() - margin,
