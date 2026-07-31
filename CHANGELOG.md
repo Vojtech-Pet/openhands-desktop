@@ -2,6 +2,11 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-07-31 — Progress-aware step limit, live reasoning preview
+
+- The 30-step agent limit no longer cuts off genuinely productive runs -- it checks recent progress first and resets instead of stopping if the run is actually going somewhere (a 30-step, all-distinct research stretch with zero repeats was getting cut off just for being long). Only stops on real no-progress. Surfaces a visible "still making progress" notice on reset so a long collapsed stretch doesn't look stalled.
+- The collapsed Working card now shows a live, LM-Studio-style reasoning preview: elapsed timer, the last two real wrapped lines of the current thinking text (updating as it streams), flipping to "Completed ✓" once the turn ends. Purely visual -- nothing is actually truncated, full text stays in the expandable body.
+
 ## 2026-07-31 — Fixed a serious bug: conversations could get permanently stuck on an unanswered question
 
 - A conversation not attached to any open window could hang forever on `ask_user_question` with nobody able to see or answer it -- the agent would sit blocked (or get repeatedly interrupted by OpenHands's own stuck detector trying something else) with no visible sign anything needed attention.
