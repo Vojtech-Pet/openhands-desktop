@@ -9,6 +9,8 @@ GET /api/v1/app-conversations/search endpoint.
 
 from __future__ import annotations
 
+import asyncio
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog,
@@ -50,6 +52,54 @@ _STATUS_COLOR = {
     ExecutionStatus.IDLE: TEXT_MUTED,
     ExecutionStatus.DELETING: TEXT_MUTED,
 }
+
+
+async def _find_orphaned_sandboxes(conversations: list[AppConversation]) -> list[str]:
+    """Docker containers (`oh-agent-server-*`) the app-server has no live
+    record of, so nothing in the API can reach or stop them.
+
+    Confirmed live 2026-08-01: an app-server restart mid-conversation loses
+    its (in-memory-only) sandbox bookkeeping, but the container itself keeps
+    running -- `docker ps` sees it fine while `/app-conversations/search`
+    reports that conversation's `sandbox_status` as "MISSING" or omits it
+    entirely. A container is only NOT orphaned if some conversation reports
+    a real (non-MISSING) sandbox_status referencing it.
+    """
+    alive_sandbox_ids = {
+        c.sandbox_id
+        for c in conversations
+        if c.sandbox_id and c.sandbox_status and c.sandbox_status != "MISSING"
+    }
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "ps", "--filter", "name=oh-agent-server-", "--format", "{{.Names}}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+    except (OSError, asyncio.TimeoutError):
+        return []  # docker not available/reachable -- not an error condition worth surfacing here
+    # sandbox_id already includes the "oh-agent-server-" prefix (confirmed
+    # live: e.g. "oh-agent-server-5TKX1QSoZQSbXw0FFtqmyf" matches the
+    # container's own name exactly) -- compare full names, not a stripped
+    # suffix, or every genuinely-alive container would look orphaned.
+    names = [line.strip() for line in stdout.decode(errors="replace").splitlines() if line.strip()]
+    return [name for name in names if name not in alive_sandbox_ids]
+
+
+async def _stop_container(container_name: str) -> None:
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "stop", container_name,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await asyncio.wait_for(proc.wait(), timeout=30.0)
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "rm", container_name,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await asyncio.wait_for(proc.wait(), timeout=10.0)
 
 
 def _status_row(conversation: AppConversation, on_delete) -> QWidget:
@@ -95,6 +145,46 @@ def _show_task_menu(anchor: QWidget, conversation_id: str, on_delete) -> None:
     delete_action = menu.addAction("Delete conversation")
     delete_action.triggered.connect(lambda: on_delete(conversation_id))
     menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
+
+def _orphan_row(container_name: str, on_stop) -> QWidget:
+    """A Docker container the app-server itself has lost track of --
+    confirmed live 2026-08-01: after an app-server restart mid-conversation,
+    its sandbox bookkeeping is in-memory only, so a still-running container
+    shows up nowhere in /app-conversations/search (or with
+    sandbox_status "MISSING") even though `docker ps` sees it fine, silently
+    keeping VRAM/RAM held with no way to reach or stop it through the API.
+    """
+    row = QWidget()
+    row.setObjectName("TaskRow")
+    row.setStyleSheet(
+        f"#TaskRow {{ background-color: {BG_SURFACE_2}; border: 1px solid {BORDER}; "
+        f"border-left: 3px solid {COLOR_WARNING}; border-radius: {RADIUS_MD}px; }}"
+    )
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(SPACE_SM, SPACE_XS, SPACE_SM, SPACE_XS)
+
+    text_col = QVBoxLayout()
+    text_col.setSpacing(0)
+    title_label = QLabel(container_name)
+    title_label.setStyleSheet(f"color: {TEXT_PRIMARY}; font-weight: 600;")
+    text_col.addWidget(title_label)
+    detail_label = QLabel("Orphaned container -- app-server has no record of it")
+    detail_label.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 12px;")
+    text_col.addWidget(detail_label)
+    layout.addLayout(text_col, 1)
+
+    status_label = QLabel("orphaned")
+    status_label.setStyleSheet(f"color: {COLOR_WARNING}; font-size: 12.5px; font-weight: 600;")
+    layout.addWidget(status_label)
+
+    stop_btn = QPushButton("Stop container")
+    stop_btn.setStyleSheet(f"QPushButton {{ color: {COLOR_DANGER}; }}")
+    stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    stop_btn.clicked.connect(lambda: on_stop(container_name))
+    layout.addWidget(stop_btn)
+
+    return row
 
 
 class TaskBoardDialog(QDialog):
@@ -151,17 +241,29 @@ class TaskBoardDialog(QDialog):
         self._list.clear()
         loading = QListWidgetItem("Loading…")
         self._list.addItem(loading)
-        run_async(self, self._client.search_conversations(), self._on_loaded, error_title="Failed to load tasks")
+        run_async(self, self._load_all(), self._on_loaded, error_title="Failed to load tasks")
 
-    def _on_loaded(self, conversations: list[AppConversation]) -> None:
+    async def _load_all(self) -> tuple[list[AppConversation], list[str]]:
+        conversations = await self._client.search_conversations()
+        orphans = await _find_orphaned_sandboxes(conversations)
+        return conversations, orphans
+
+    def _on_loaded(self, result: tuple[list[AppConversation], list[str]]) -> None:
+        conversations, orphans = result
         self._list.clear()
         conversations = sorted(conversations, key=lambda c: c.raw.get("updated_at", ""), reverse=True)
         self._conversations = conversations
         self._delete_all_btn.setEnabled(bool(conversations))
-        if not conversations:
+        if not conversations and not orphans:
             empty = QListWidgetItem("No conversations on this server yet.")
             self._list.addItem(empty)
             return
+        for container_name in orphans:
+            item = QListWidgetItem()
+            row = _orphan_row(container_name, self._confirm_stop_orphan)
+            item.setSizeHint(row.sizeHint())
+            self._list.addItem(item)
+            self._list.setItemWidget(item, row)
         for conversation in conversations:
             item = QListWidgetItem()
             item.setData(1000, conversation.id)
@@ -169,6 +271,23 @@ class TaskBoardDialog(QDialog):
             item.setSizeHint(row.sizeHint())
             self._list.addItem(item)
             self._list.setItemWidget(item, row)
+
+    def _confirm_stop_orphan(self, container_name: str) -> None:
+        reply = QMessageBox.question(
+            self,
+            "Stop orphaned container",
+            f'Stop and remove "{container_name}"? The app-server has no record of it, '
+            "so this can't be undone through the API -- only through Docker directly.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            run_async(
+                self,
+                _stop_container(container_name),
+                lambda _result: self._reload(),
+                error_title="Failed to stop container",
+            )
 
     def _on_item_double_clicked(self, item: QListWidgetItem) -> None:
         conversation_id = item.data(1000)
