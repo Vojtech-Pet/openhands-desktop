@@ -1919,6 +1919,24 @@ class MainWindow(QMainWindow):
             )
         else:
             self._remember_user_message(text)
+            if self._last_run_state == RunState.RUNNING:
+                # send_message only appends to the conversation's event
+                # history -- it does NOT interrupt whatever LLM call is
+                # already in flight, and whether the agent even acts on it
+                # once it does see it depends entirely on the model
+                # noticing and prioritizing it over what it was already
+                # doing. Confirmed live 2026-07-31: a real local model kept
+                # executing its original plan for multiple further steps
+                # after being told "stop, wait for instructions" -- the
+                # message was recorded almost instantly but had zero effect
+                # on behavior. Use Stop (interrupt) first if it actually
+                # needs to react now, not just a plain message.
+                self._append_log(
+                    "Agent is currently working -- this message is queued and will "
+                    "only be picked up at its next step, not acted on immediately. "
+                    "If you need it to react right now, click Stop first.",
+                    kind="system",
+                )
             self._controller.send_message(text)
 
     async def _start_new_after_model_ready(
