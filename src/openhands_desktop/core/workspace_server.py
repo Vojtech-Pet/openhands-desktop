@@ -140,6 +140,15 @@ class WorkspaceFolderServer:
                     "needs a directory. If the user wants a specific file, connect its "
                     "parent folder instead and read_file the file from there."
                 )
+            if candidate == self._root:
+                # Already connected to exactly this folder -- confirmed live
+                # 2026-07-31: an agent re-calling connect_folder on a path it
+                # had already been granted (e.g. after losing track of state
+                # mid-task, or just calling it defensively before every
+                # list_folder) re-triggered the confirmation dialog every
+                # time, for a grant the user had already given. Nothing new
+                # is being requested here, so nothing new to ask about.
+                return f"Already connected. list_folder('.') shows the contents of {candidate}."
             if self._on_confirm_connect is not None:
                 approved = await self._on_confirm_connect(str(candidate))
                 if not approved:
@@ -255,6 +264,20 @@ class WorkspaceFolderServer:
         config = uvicorn.Config(app, host=self.host, port=self.port, log_level="warning", access_log=False)
         self._server = uvicorn.Server(config)
         self._task = asyncio.ensure_future(self._server.serve())
+        # serve() returns as soon as the task is scheduled, not once the
+        # socket is actually bound -- a conversation created right after this
+        # (e.g. right after an app restart) can race ahead of that and hit
+        # the bridge port before anything is listening. The sandbox's MCP
+        # client (fastmcp) doesn't recover cleanly from that first connect
+        # failure -- confirmed live 2026-07-31: every later call on the same
+        # session kept failing with "Internal error: nesting counter should
+        # be 0" even after the user approved the confirmation dialog, until
+        # the agent burned through its iteration limit. Waiting for the real
+        # `started` flag here closes that window.
+        for _ in range(100):
+            if self._server.started:
+                break
+            await asyncio.sleep(0.05)
 
     async def stop(self) -> None:
         if self._server is not None:

@@ -116,7 +116,14 @@ async def detect_loaded_model(base_urls: tuple[str, ...] | None = None) -> Loade
 
     if base_urls:
         return None
-    return _detect_loaded_model_from_lms_cli()
+    # Blocks on spawning the `lms` CLI process (genuinely can take over a
+    # second) -- confirmed live 2026-07-31 as a cause of the whole GUI
+    # freezing briefly: this runs on the qasync event loop (the same one
+    # that pumps Qt's own UI events) every _model_sync_timer tick (15s)
+    # whenever LM Studio's REST endpoint doesn't answer immediately, e.g.
+    # while it's busy mid-generation. asyncio.to_thread moves the blocking
+    # subprocess call off that loop.
+    return await asyncio.to_thread(_detect_loaded_model_from_lms_cli)
 
 
 async def probe_llm_server_state(base_urls: tuple[str, ...] | None = None) -> str:
@@ -181,6 +188,52 @@ def _detect_loaded_model_from_lms_cli() -> LoadedModel | None:
     )
 
 
+_PLAN_OR_CODE_SCHEMA = {
+    "type": "object",
+    "properties": {"mode": {"type": "string", "enum": ["plan", "code"]}},
+    "required": ["mode"],
+}
+
+
+async def classify_plan_or_code(base_url: str, model: str, task: str) -> str:
+    """One cheap classification call, borrowed from how Claude Code itself
+    judges whether a request needs a plan before touching anything: ambiguous
+    or multi-step work gets PLAN, a single well-defined change gets CODE.
+    Defaults to "code" (today's existing default) on any failure -- a wrong
+    guess here should degrade to today's behavior, not block sending."""
+    root = _server_root(base_url)
+    payload = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Classify the user's task. Reply 'plan' if it is ambiguous, "
+                    "spans multiple files/steps, or needs research/design before "
+                    "any change should be made. Reply 'code' if it is a single, "
+                    "well-defined change that can start immediately."
+                ),
+            },
+            {"role": "user", "content": task[:4000]},
+        ],
+        "max_tokens": 200,
+        "temperature": 0.0,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "plan_or_code", "strict": True, "schema": _PLAN_OR_CODE_SCHEMA},
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(f"{root}/v1/chat/completions", json=payload)
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"].get("content") or ""
+            mode = json.loads(content).get("mode")
+            return mode if mode in ("plan", "code") else "code"
+    except (httpx.HTTPError, ValueError, KeyError, IndexError):
+        return "code"
+
+
 def model_variant(profile_name: str, model: str) -> str | None:
     value = f"{profile_name} {model}".lower()
     if "35b" in value:
@@ -190,8 +243,18 @@ def model_variant(profile_name: str, model: str) -> str | None:
     return None
 
 
-async def ensure_profile_model_loaded(profile_name: str, model: str) -> None:
-    """Ensure the known local Plan/Code profile is physically loaded."""
+DEFAULT_LM_STUDIO_CONTEXT_LENGTH = 131072
+
+
+async def ensure_profile_model_loaded(
+    profile_name: str, model: str, context_length: int = DEFAULT_LM_STUDIO_CONTEXT_LENGTH
+) -> None:
+    """Ensure the known local Plan/Code profile is physically loaded.
+
+    `context_length` only takes effect on the local fallback load path
+    (_load_model_with_lms) -- the http://127.0.0.1:8899/swap helper, when
+    reachable, decides context length itself and isn't told this value.
+    """
     variant = model_variant(profile_name, model)
     if variant is None:
         return
@@ -210,7 +273,7 @@ async def ensure_profile_model_loaded(profile_name: str, model: str) -> None:
                 raise RuntimeError(payload.get("detail") or "LM Studio model swap failed")
     except (httpx.HTTPError, ValueError, RuntimeError) as exc:
         helper_error = exc
-        await asyncio.to_thread(_load_model_with_lms, target["key"], target["identifier"])
+        await asyncio.to_thread(_load_model_with_lms, target["key"], target["identifier"], context_length)
 
     detected = await detect_loaded_model()
     if detected is None or not _matches_identifier(detected, target["identifier"]):
@@ -218,7 +281,7 @@ async def ensure_profile_model_loaded(profile_name: str, model: str) -> None:
         # quantization/identifier. Correct that locally instead of leaving the
         # selected profile and physical model out of sync.
         if helper_error is None:
-            await asyncio.to_thread(_load_model_with_lms, target["key"], target["identifier"])
+            await asyncio.to_thread(_load_model_with_lms, target["key"], target["identifier"], context_length)
             detected = await detect_loaded_model()
     if detected is None or not _matches_identifier(detected, target["identifier"]):
         detail = f": {helper_error}" if helper_error is not None else ""
@@ -230,7 +293,9 @@ def _matches_identifier(detected: LoadedModel, identifier: str) -> bool:
     return any(str(alias).strip().lower() == wanted for alias in detected.aliases or (detected.model_id,))
 
 
-def _load_model_with_lms(model_key: str, identifier: str) -> None:
+def _load_model_with_lms(
+    model_key: str, identifier: str, context_length: int = DEFAULT_LM_STUDIO_CONTEXT_LENGTH
+) -> None:
     lms = shutil.which("lms") or _LMS
     subprocess.run(
         [lms, "server", "start", "--port", "1234", "--bind", "0.0.0.0"],
@@ -246,13 +311,21 @@ def _load_model_with_lms(model_key: str, identifier: str) -> None:
         timeout=30,
         check=False,
     )
+    # 2026-07-31: this used to be hardcoded at 32768, well below what the
+    # profiles' max_input_tokens/condenser.max_tokens actually expect (every
+    # model swap the app itself triggers -- Plan/Code switch, Continue as
+    # Code, manual profile activation -- goes through this function, not
+    # openhands-plan-launch.sh's own --context-length 131072). A 49316-token
+    # request got rejected by a model loaded here with only 32768 available.
+    # Now a caller-supplied value (Settings -> LLM -> LM Studio context
+    # length), not another hardcoded number.
     loaded = subprocess.run(
         [
             lms,
             "load",
             model_key,
             "--context-length",
-            "32768",
+            str(context_length),
             "--parallel",
             "1",
             "--gpu",

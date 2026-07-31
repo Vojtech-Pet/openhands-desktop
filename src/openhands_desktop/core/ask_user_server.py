@@ -129,6 +129,13 @@ class AskUserServer:
         )
         self._server = uvicorn.Server(config)
         self._task = asyncio.ensure_future(self._server.serve())
+        # See WorkspaceFolderServer.start's comment -- wait for the socket to
+        # actually be bound so a conversation started right after this can't
+        # race ahead of it and hit an MCP client that never recovers.
+        for _ in range(100):
+            if self._server.started:
+                break
+            await asyncio.sleep(0.05)
 
     async def stop(self) -> None:
         if self._server is not None:

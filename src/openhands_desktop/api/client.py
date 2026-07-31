@@ -22,7 +22,18 @@ DEFAULT_SETTINGS_CACHE_PATH = Path.home() / ".config" / "openhands-desktop" / "s
 class AppServerClient:
     def __init__(self, base_url: str = "http://127.0.0.1:3000") -> None:
         self.base_url = base_url.rstrip("/")
-        self._client = httpx.AsyncClient(base_url=self.base_url, timeout=30.0)
+        # retries=1 covers a specific, harmless race: uvicorn closes an idle
+        # keep-alive connection after its own timeout, and if httpx reuses
+        # that exact pooled connection just as/after that happens, the
+        # request fails with "Server disconnected without sending a
+        # response." -- confirmed live 2026-07-31 via the status-polling
+        # loop's error_occurred signal. httpx's own documented fix: retry
+        # once on a fresh connection (safe here, every call this client
+        # makes is either GET or an idempotent-in-practice POST/DELETE that
+        # never partially applied on the failed attempt, since it never
+        # reached the server).
+        transport = httpx.AsyncHTTPTransport(retries=1)
+        self._client = httpx.AsyncClient(base_url=self.base_url, timeout=30.0, transport=transport)
         self._settings_cache_path = DEFAULT_SETTINGS_CACHE_PATH
 
     def _load_cached_settings(self) -> dict:

@@ -491,6 +491,8 @@ class _LlmPage(QWidget):
     profiles_changed = Signal()
     default_plan_model_changed = Signal(str)  # profile name, "" clears it
     default_code_model_changed = Signal(str)  # profile name, "" clears it
+    auto_decide_plan_code_changed = Signal(bool)
+    lm_studio_context_length_changed = Signal(int)
 
     def __init__(
         self,
@@ -500,6 +502,8 @@ class _LlmPage(QWidget):
         *,
         default_plan_model: str | None = None,
         default_code_model: str | None = None,
+        auto_decide_plan_code: bool = True,
+        lm_studio_context_length: int = 131072,
     ) -> None:
         super().__init__()
         self._client = client
@@ -510,6 +514,11 @@ class _LlmPage(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         self._page, self._layout = _page("LLM", "llm", "Language model profiles available to this workspace.")
         outer.addWidget(self._page)
+
+        self._active_label = QLabel()
+        self._active_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px;")
+        self._update_active_label()
+        self._layout.addWidget(self._active_label)
 
         # Client-only convenience (not a server concept): auto-switch the
         # Model chip when starting a Plan conversation or when using
@@ -538,6 +547,36 @@ class _LlmPage(QWidget):
         )
         defaults_form.addRow("Default Plan model", self._plan_model_combo)
         defaults_form.addRow("Default Code model", self._code_model_combo)
+
+        self._auto_decide_check = QCheckBox("Auto-decide Plan/Code (toolbar checkbox mirrors this)")
+        self._auto_decide_check.setToolTip(
+            "Before starting a new conversation, ask the model whether the task needs "
+            "a Plan first or can go straight to Code, instead of picking manually."
+        )
+        self._auto_decide_check.setChecked(auto_decide_plan_code)
+        self._auto_decide_check.toggled.connect(self.auto_decide_plan_code_changed.emit)
+        defaults_form.addRow("", self._auto_decide_check)
+
+        self._context_length = QSpinBox()
+        self._context_length.setRange(2048, 262144)
+        self._context_length.setSingleStep(1024)
+        self._context_length.setValue(lm_studio_context_length)
+        self._context_length.setToolTip(
+            "--context-length passed to LM Studio whenever this app loads a model itself "
+            "(Plan/Code switch, Continue as Code, activating a profile). Must be >= the "
+            "profiles' max_input_tokens/condenser.max_tokens or requests get rejected -- "
+            "confirmed live 2026-07-31: a 49316-token request failed against a model "
+            "loaded with only 32768 available. Doesn't affect an already-loaded model; "
+            "only takes effect on the next swap this app triggers."
+        )
+        # editingFinished, not valueChanged -- the latter fires on every
+        # single step/keystroke, which would fire off the (several API
+        # calls deep) profile-sync chain on the far end for every click of
+        # the spinner arrows instead of once when the user is actually done.
+        self._context_length.editingFinished.connect(
+            lambda: self.lm_studio_context_length_changed.emit(self._context_length.value())
+        )
+        defaults_form.addRow("LM Studio context length", self._context_length)
 
         defaults_note = QLabel(
             "When set, switching to Plan (new conversation) or clicking Continue as Code "
@@ -603,10 +642,15 @@ class _LlmPage(QWidget):
         def _on_done(result):
             profiles, active = result
             self._active_name = active
+            self._update_active_label()
             self._render(profiles)
             self.profiles_changed.emit()
 
         _run_async(self, _fetch(), _on_done, error_title="Failed to reload profiles")
+
+    def _update_active_label(self) -> None:
+        text = f"Toolbar's active model right now: {self._active_name}" if self._active_name else "No model is currently active."
+        self._active_label.setText(text)
 
     def _on_activate_clicked(self, name: str) -> None:
         if name == self._active_name:
@@ -646,7 +690,11 @@ class _LlmPage(QWidget):
 
 
 class _AgentPage(QWidget):
-    def __init__(self, client: AppServerClient, agent_settings: dict) -> None:
+    auto_supervise_changed = Signal(bool)
+
+    def __init__(
+        self, client: AppServerClient, agent_settings: dict, *, auto_supervise: bool = True
+    ) -> None:
         super().__init__()
         self._client = client
         outer = QVBoxLayout(self)
@@ -676,6 +724,21 @@ class _AgentPage(QWidget):
         self._instructions.setPlaceholderText("e.g. Always write tests before implementing a feature.")
         self._instructions.setFixedHeight(80)
         form.addRow("Custom instructions", self._instructions)
+
+        # Client-only preference (not a server concept, so not part of the
+        # Save button's agent_settings_diff below) -- takes effect instantly
+        # on toggle, same as the toolbar's own auto-behavior checkboxes.
+        self._auto_supervise_check = QCheckBox("Auto-supervise conversations")
+        self._auto_supervise_check.setToolTip(
+            "Watch every conversation's live event stream for repeated tool calls "
+            "(same tool, same arguments) -- nudge once when it happens, and stop "
+            "(interrupt only) if the agent repeats it again after that. Runs "
+            "automatically on every new conversation; turn off to rely only on "
+            "the SDK's own (less configurable) stuck detector instead."
+        )
+        self._auto_supervise_check.setChecked(auto_supervise)
+        self._auto_supervise_check.toggled.connect(self.auto_supervise_changed.emit)
+        form.addRow("", self._auto_supervise_check)
 
         self._save_btn = QPushButton("Save")
         self._save_btn.clicked.connect(self._on_save)
@@ -1413,6 +1476,9 @@ class SettingsDialog(QDialog):
     profiles_changed = Signal()
     default_plan_model_changed = Signal(str)
     default_code_model_changed = Signal(str)
+    auto_decide_plan_code_changed = Signal(bool)
+    lm_studio_context_length_changed = Signal(int)
+    auto_supervise_changed = Signal(bool)
 
     def __init__(
         self,
@@ -1424,6 +1490,9 @@ class SettingsDialog(QDialog):
         active_profile_name: str | None = None,
         default_plan_model: str | None = None,
         default_code_model: str | None = None,
+        auto_decide_plan_code: bool = True,
+        lm_studio_context_length: int = 131072,
+        auto_supervise: bool = True,
     ) -> None:
         super().__init__(parent)
         self._client = client
@@ -1487,14 +1556,21 @@ class SettingsDialog(QDialog):
             active_profile_name,
             default_plan_model=default_plan_model,
             default_code_model=default_code_model,
+            auto_decide_plan_code=auto_decide_plan_code,
+            lm_studio_context_length=lm_studio_context_length,
         )
         self._llm_page.activate_requested.connect(self.profile_activate_requested.emit)
         self._llm_page.profiles_changed.connect(self.profiles_changed.emit)
         self._llm_page.default_plan_model_changed.connect(self.default_plan_model_changed.emit)
         self._llm_page.default_code_model_changed.connect(self.default_code_model_changed.emit)
+        self._llm_page.auto_decide_plan_code_changed.connect(self.auto_decide_plan_code_changed.emit)
+        self._llm_page.lm_studio_context_length_changed.connect(self.lm_studio_context_length_changed.emit)
+
+        self._agent_page = _AgentPage(client, agent_settings, auto_supervise=auto_supervise)
+        self._agent_page.auto_supervise_changed.connect(self.auto_supervise_changed.emit)
 
         pages = {
-            "Agent": lambda: _AgentPage(client, agent_settings),
+            "Agent": lambda: self._agent_page,
             "LLM": lambda: self._llm_page,
             "Condenser": lambda: _CondenserPage(client, agent_settings),
             "Verification": lambda: _VerificationPage(client, conversation_settings),

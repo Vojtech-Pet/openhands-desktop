@@ -7,6 +7,13 @@ same hash-based repeat detection, progress scoring, and 1-nudge-then-stop
 policy from control.py against its real event stream, instead of trusting
 the SDK's own stuck detector (whose threshold isn't configurable from here --
 see the 2026-07-30 conversation history) or leaving loops to run unwatched.
+
+ConversationWatchdog attaches to a controller that already exists (and that
+someone else drives the lifecycle of) -- this is what lets main_window.py
+supervise every normal conversation automatically (2026-07-31), not just the
+ones explicitly started through the Supervised Agent dialog.
+supervise_openhands_task keeps its own controller + start_new for that
+dialog's standalone use.
 """
 
 from __future__ import annotations
@@ -49,80 +56,96 @@ async def _interrupt_and_nudge(controller: ConversationController) -> None:
     controller.send_message(NUDGE_TEXT)
 
 
-async def supervise_openhands_task(
-    task: str,
-    client: AppServerClient,
-    on_step: Callable[[dict[str, Any]], None] | None = None,
-    llm_model: str | None = None,
-    agent_type: str = "default",
-) -> dict[str, Any]:
-    """Starts a new OpenHands conversation for `task` and watches it.
-
-    Returns a result dict shaped like run_agent.py's: at least a "status" key
-    (COMPLETED, FINISHED_UNVERIFIED, STUCK, STOPPED, ERROR).
+class ConversationWatchdog:
+    """Hash-dedup + progress-scoring watchdog over an *existing*
+    ConversationController's live event stream. Doesn't create the
+    conversation or own its lifecycle -- just watches, nudges once on a
+    repeat, and stops (interrupt only) if that doesn't help. `on_step` is
+    called on the qasync loop for every action/observation/nudge/stuck/state
+    event, same shape supervise_openhands_task already emits, so callers
+    (the Supervised Agent dialog, or main_window's own log) can render it
+    the same way either path produced it.
     """
-    controller = ConversationController(client)
-    done: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
 
-    def emit(event: dict[str, Any]) -> None:
-        if on_step is not None:
-            on_step(event)
+    def __init__(
+        self,
+        controller: ConversationController,
+        on_step: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
+        self._controller = controller
+        self._on_step = on_step
+        self._attached = False
+        self.reset()
+        controller.events_received.connect(self._on_events)
+        controller.state_changed.connect(self._on_state_changed)
+        self._attached = True
 
-    def finish(result: dict[str, Any]) -> None:
-        if not done.done():
-            done.set_result(result)
+    def reset(self) -> None:
+        """Called when the same controller starts a *new* conversation
+        (e.g. main_window.py reuses one ConversationWatchdog across the
+        window's lifetime, one conversation at a time) -- otherwise counts
+        from a finished conversation would bleed into the next one."""
+        self._tool_call_counts: dict[str, int] = {}
+        self._result_hashes: list[str] = []
+        self._same_result_streak = 0
+        self._progress_history: list[int] = []
+        self._nudges_used = 0
+        self._action_count = 0
+        self._stopped = False
 
-    tool_call_counts: dict[str, int] = {}
-    result_hashes: list[str] = []
-    same_result_streak = 0
-    progress_history: list[int] = []
-    nudges_used = 0
-    action_count = 0
-    stopped = False
+    @property
+    def action_count(self) -> int:
+        return self._action_count
 
-    def on_error(message: str) -> None:
-        emit({"kind": "error", "message": message})
+    def detach(self) -> None:
+        if not self._attached:
+            return
+        try:
+            self._controller.events_received.disconnect(self._on_events)
+            self._controller.state_changed.disconnect(self._on_state_changed)
+        except (RuntimeError, TypeError):
+            pass
+        self._attached = False
 
-    def on_events(events: list[NormalizedEvent]) -> None:
-        nonlocal action_count, nudges_used, same_result_streak, stopped
-        if stopped or done.done():
+    def _emit(self, event: dict[str, Any]) -> None:
+        if self._on_step is not None:
+            self._on_step(event)
+
+    def _on_events(self, events: list[NormalizedEvent]) -> None:
+        if self._stopped:
             return
         for event in events:
             if event.kind == EventKind.ACTION:
                 if event.tool_name == "finish":
-                    continue  # real completion is handled via state_changed
-                action_count += 1
-                if action_count > MAX_AGENT_STEPS:
-                    stopped = True
-                    controller.interrupt()
-                    finish({"status": "STOPPED", "reason": f"Dosiahnutý limit {MAX_AGENT_STEPS} krokov."})
+                    continue
+                self._action_count += 1
+                if self._action_count > MAX_AGENT_STEPS:
+                    self._stopped = True
+                    self._controller.interrupt()
+                    self._emit(
+                        {"kind": "stuck", "reason": f"Dosiahnutý limit {MAX_AGENT_STEPS} krokov."}
+                    )
                     return
 
                 tool_name = event.tool_name or "?"
-                arguments = _extract_arguments(event.raw)
-                arguments = normalize_arguments(tool_name, arguments)
+                arguments = normalize_arguments(tool_name, _extract_arguments(event.raw))
                 fingerprint = call_hash(tool_name, arguments)
-                count = tool_call_counts.get(fingerprint, 0) + 1
-                tool_call_counts[fingerprint] = count
+                count = self._tool_call_counts.get(fingerprint, 0) + 1
+                self._tool_call_counts[fingerprint] = count
 
-                emit({"kind": "action", "tool": tool_name, "arguments": arguments, "repeat_count": count})
+                self._emit({"kind": "action", "tool": tool_name, "arguments": arguments, "repeat_count": count})
 
                 if count > 1:
-                    if nudges_used < MAX_AUTO_NUDGES:
-                        nudges_used += 1
-                        emit({"kind": "nudge", "tool": tool_name})
-                        asyncio.ensure_future(_interrupt_and_nudge(controller))
+                    if self._nudges_used < MAX_AUTO_NUDGES:
+                        self._nudges_used += 1
+                        self._emit({"kind": "nudge", "tool": tool_name})
+                        asyncio.ensure_future(_interrupt_and_nudge(self._controller))
                     else:
-                        stopped = True
-                        emit({"kind": "stuck", "reason": f"Opakovaný tool call ({tool_name}) po auto-nudge."})
-                        controller.interrupt()
-                        finish(
-                            {
-                                "status": "STUCK",
-                                "reason": f"Opakovaný rovnaký tool call ({tool_name}) po auto-nudge.",
-                                "steps": action_count,
-                            }
+                        self._stopped = True
+                        self._emit(
+                            {"kind": "stuck", "reason": f"Opakovaný tool call ({tool_name}) po auto-nudge."}
                         )
+                        self._controller.interrupt()
                         return
 
             elif event.kind == EventKind.OBSERVATION:
@@ -130,11 +153,11 @@ async def supervise_openhands_task(
                     continue
                 text = event.text or ""
                 current_hash = result_hash(text)
-                duplicate_result = current_hash in result_hashes
-                result_hashes.append(current_hash)
-                same_result_streak = same_result_streak + 1 if duplicate_result else 0
+                duplicate_result = current_hash in self._result_hashes
+                self._result_hashes.append(current_hash)
+                self._same_result_streak = self._same_result_streak + 1 if duplicate_result else 0
 
-                emit(
+                self._emit(
                     {
                         "kind": "observation",
                         "tool": event.tool_name,
@@ -143,14 +166,13 @@ async def supervise_openhands_task(
                     }
                 )
 
-                if same_result_streak >= MAX_SAME_RESULT:
-                    stopped = True
-                    controller.interrupt()
-                    finish(
+                if self._same_result_streak >= MAX_SAME_RESULT:
+                    self._stopped = True
+                    self._controller.interrupt()
+                    self._emit(
                         {
-                            "status": "STUCK",
+                            "kind": "stuck",
                             "reason": f"{MAX_SAME_RESULT} kroky po sebe neprinesli žiadnu novú informáciu.",
-                            "steps": action_count,
                         }
                     )
                     return
@@ -161,44 +183,82 @@ async def supervise_openhands_task(
                     duplicate_call=False,
                     duplicate_result=duplicate_result,
                 )
-                progress_history.append(progress)
+                self._progress_history.append(progress)
 
-                if len(progress_history) >= NO_PROGRESS_WINDOW:
-                    recent = progress_history[-NO_PROGRESS_WINDOW:]
+                if len(self._progress_history) >= NO_PROGRESS_WINDOW:
+                    recent = self._progress_history[-NO_PROGRESS_WINDOW:]
                     if sum(recent) <= 0:
-                        stopped = True
-                        controller.interrupt()
-                        finish(
+                        self._stopped = True
+                        self._controller.interrupt()
+                        self._emit(
                             {
-                                "status": "STUCK",
+                                "kind": "stuck",
                                 "reason": f"Posledných {NO_PROGRESS_WINDOW} krokov neprinieslo pokrok.",
-                                "steps": action_count,
                             }
                         )
                         return
 
-    def on_state_changed(state: RunState) -> None:
-        if stopped or done.done():
+    def _on_state_changed(self, state: RunState) -> None:
+        if self._stopped:
             return
-        emit({"kind": "state", "state": state.name})
-        if state == RunState.COMPLETED:
-            finish({"status": "COMPLETED", "steps": action_count})
-        elif state == RunState.FINISHED_UNVERIFIED:
-            finish({"status": "FINISHED_UNVERIFIED", "steps": action_count})
-        elif state == RunState.ERROR:
-            finish({"status": "ERROR", "reason": "Conversation reported an error state.", "steps": action_count})
+        self._emit({"kind": "state", "state": state.name})
+
+
+async def supervise_openhands_task(
+    task: str,
+    client: AppServerClient,
+    on_step: Callable[[dict[str, Any]], None] | None = None,
+    llm_model: str | None = None,
+    agent_type: str = "default",
+) -> dict[str, Any]:
+    """Starts a new OpenHands conversation for `task` and watches it with a
+    ConversationWatchdog. Returns a result dict shaped like run_agent.py's:
+    at least a "status" key (COMPLETED, FINISHED_UNVERIFIED, STUCK, STOPPED,
+    ERROR)."""
+    controller = ConversationController(client)
+    done: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
+    caller_on_step = on_step
+
+    def finish(result: dict[str, Any]) -> None:
+        if not done.done():
+            done.set_result(result)
+
+    def watch_step(event: dict[str, Any]) -> None:
+        if caller_on_step is not None:
+            caller_on_step(event)
+        if done.done():
+            return
+        if event["kind"] == "stuck":
+            finish({"status": "STUCK", "reason": event["reason"], "steps": watchdog.action_count})
+        elif event["kind"] == "state":
+            state = RunState[event["state"]]
+            if state == RunState.COMPLETED:
+                finish({"status": "COMPLETED", "steps": watchdog.action_count})
+            elif state == RunState.FINISHED_UNVERIFIED:
+                finish({"status": "FINISHED_UNVERIFIED", "steps": watchdog.action_count})
+            elif state == RunState.ERROR:
+                finish(
+                    {
+                        "status": "ERROR",
+                        "reason": "Conversation reported an error state.",
+                        "steps": watchdog.action_count,
+                    }
+                )
+
+    watchdog = ConversationWatchdog(controller, on_step=watch_step)
+
+    def on_error(message: str) -> None:
+        if caller_on_step is not None:
+            caller_on_step({"kind": "error", "message": message})
 
     controller.error_occurred.connect(on_error)
-    controller.events_received.connect(on_events)
-    controller.state_changed.connect(on_state_changed)
 
     try:
         controller.start_new(llm_model=llm_model, initial_message=task, agent_type=agent_type)
         result = await done
     finally:
         controller.error_occurred.disconnect(on_error)
-        controller.events_received.disconnect(on_events)
-        controller.state_changed.disconnect(on_state_changed)
+        watchdog.detach()
         await controller.stop()
 
     return result

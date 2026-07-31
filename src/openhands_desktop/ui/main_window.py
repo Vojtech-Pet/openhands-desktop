@@ -9,6 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import QModelIndex, QSize, QSettings, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon, QKeyEvent, QMouseEvent, QPainter, QTextCursor
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -35,9 +36,12 @@ from PySide6.QtWidgets import (
 
 from openhands_desktop.api.client import AppServerClient
 from openhands_desktop.api.llm_server_client import (
+    DEFAULT_LM_STUDIO_CONTEXT_LENGTH,
+    classify_plan_or_code,
     detect_loaded_model,
     ensure_profile_model_loaded,
     probe_llm_server_state,
+    profile_base_url,
     same_server,
 )
 from openhands_desktop.core.completion import RunState
@@ -54,10 +58,11 @@ from openhands_desktop.ui.icons import icon
 from openhands_desktop.ui.task_board import TaskBoardDialog
 from openhands_desktop.ui.icon_rail import IconRail
 from openhands_desktop.ui.log_view import LogView
-from openhands_desktop.ui.palette import COLOR_NEUTRAL
+from openhands_desktop.ui.palette import COLOR_NEUTRAL, TEXT_MUTED
 from openhands_desktop.ui.right_panel import RightPanel, panel_toggle_button
 from openhands_desktop.ui.settings_dialog import SettingsDialog
 from openhands_desktop.ui.sidebar import Sidebar
+from openhands_desktop.supervised_agent.openhands_supervisor import ConversationWatchdog
 from openhands_desktop.ui.supervised_agent_dialog import SupervisedAgentDialog
 from openhands_desktop.ui.spacing import (
     COMPOSER_INPUT_HEIGHT,
@@ -302,6 +307,11 @@ class MainWindow(QMainWindow):
         self._pending_model: str | None = None
         self._pending_title: str | None = None
         self._current_agent_type: str | None = None
+        self._conversation_started_at: datetime | None = None
+        self._duration_frozen = False
+        self._auto_continue_triggered = False
+        self._auto_supervise = self._settings.value("auto_supervise", True, type=bool)
+        self._watchdog: ConversationWatchdog | None = None
         # Auto-nudge on RunState.STUCK (see _on_state_changed): capped per
         # run so a genuinely broken loop falls back to the manual button
         # after a few tries instead of auto-nudging forever.
@@ -599,6 +609,36 @@ class MainWindow(QMainWindow):
         self.agent_type_combo.currentIndexChanged.connect(self._on_agent_type_changed)
         composer_tools_row.addWidget(self.agent_type_combo)
 
+        # Borrowed from Claude Code's permission-mode selector: one combo
+        # that bundles confirmation_mode + security_analyzer into named
+        # presets instead of requiring a trip through Settings ->
+        # Verification to change either. Pushes straight to the server via
+        # update_settings. No "Plan" entry here on purpose -- Plan vs Code is
+        # now decided by the Auto-decide checkbox below (or the hidden
+        # agent_type_combo it drives), not picked from this list, so it
+        # doesn't show up as a choice in two places.
+        self.mode_combo = QComboBox()
+        self.mode_combo.setObjectName("ComposerPill")
+        self.mode_combo.addItem("Bypass permissions", userData="bypass")
+        self.mode_combo.addItem("Auto", userData="auto")
+        self.mode_combo.addItem("Manual", userData="manual")
+        self.mode_combo.setToolTip(
+            "Bypass permissions: no confirmation, no safety analyzer (fastest, least safe).\n"
+            "Auto: safety analyzer checks each action, pauses only for risky ones.\n"
+            "Manual: ask for confirmation before every action."
+        )
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        composer_tools_row.addWidget(self.mode_combo)
+
+        # Auto-decide Plan vs Code (see classify_plan_or_code): borrowed from
+        # how Claude Code itself judges whether a request needs a plan before
+        # touching anything. Toggled from Settings -> LLM only. The
+        # Code/Plan combo above stays exactly as it always was (always
+        # enabled, picked manually) -- when auto-decide is on, its value is
+        # simply not read in _send (see agent_type = None there); it never
+        # gets disabled or overridden in place.
+        self._auto_decide_plan_code = self._settings.value("auto_decide_plan_code", True, type=bool)
+
         # Presets/MemPalace/code-block used to each be their own always-
         # visible square button; collapsed into one overflow menu so the
         # bar shows the minimum -- agent type, attach (up in the input
@@ -649,6 +689,10 @@ class MainWindow(QMainWindow):
         status_bar_layout.setSpacing(SPACE_SM)
         self.state_label = QLabel("No conversation")
         status_bar_layout.addWidget(self.state_label)
+        self.duration_label = QLabel("")
+        self.duration_label.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px;")
+        self.duration_label.setToolTip("How long this conversation has been running")
+        status_bar_layout.addWidget(self.duration_label)
         self.continue_as_code_btn = QPushButton("Continue as Code →")
         self.continue_as_code_btn.setObjectName("ContinueAsCodeButton")
         self.continue_as_code_btn.setFixedHeight(STATUS_BAR_HEIGHT - 6)
@@ -659,6 +703,17 @@ class MainWindow(QMainWindow):
         self.continue_as_code_btn.setVisible(False)
         self.continue_as_code_btn.clicked.connect(self._continue_as_code)
         status_bar_layout.addWidget(self.continue_as_code_btn)
+
+        self.auto_continue_as_code_check = QCheckBox("Auto")
+        self.auto_continue_as_code_check.setToolTip(
+            "Automatically continue as Code as soon as a Plan conversation finishes, "
+            "without waiting for the button to be clicked."
+        )
+        self.auto_continue_as_code_check.setChecked(
+            self._settings.value("auto_continue_as_code", False, type=bool)
+        )
+        self.auto_continue_as_code_check.toggled.connect(self._on_auto_continue_as_code_toggled)
+        status_bar_layout.addWidget(self.auto_continue_as_code_check)
 
         self.stuck_nudge_btn = QPushButton("Interrupt && nudge →")
         self.stuck_nudge_btn.setObjectName("StuckNudgeButton")
@@ -719,6 +774,11 @@ class MainWindow(QMainWindow):
         self._model_sync_timer.timeout.connect(self._check_health)
         self._model_sync_timer.start()
 
+        self._duration_timer = QTimer(self)
+        self._duration_timer.setInterval(1000)
+        self._duration_timer.timeout.connect(self._update_duration_label)
+        self._duration_timer.start()
+
     @staticmethod
     def _simple_chip(children: list[QWidget]) -> QWidget:
         """A single-line #TopBarChip: icon(s) + label(s) side by side."""
@@ -768,6 +828,13 @@ class MainWindow(QMainWindow):
     # --- controller lifecycle -------------------------------------------------
 
     def _new_controller(self) -> None:
+        if self._watchdog is not None:
+            # old_controller.disconnect(self) below only drops signals bound
+            # to slots owned by *this* window -- the watchdog's own bound
+            # methods aren't "self", so they'd survive that and keep firing
+            # against a stopped controller unless detached explicitly here.
+            self._watchdog.detach()
+            self._watchdog = None
         if self._controller is not None:
             old_controller = self._controller
             try:
@@ -784,6 +851,9 @@ class MainWindow(QMainWindow):
         controller.compact_finished.connect(self._on_compact_finished)
         controller.token_usage_changed.connect(self._on_token_usage_changed)
         self._controller = controller
+        self._auto_continue_triggered = False
+        if self._auto_supervise:
+            self._watchdog = ConversationWatchdog(controller, on_step=self._on_watchdog_step)
 
     def _on_controller_starting_changed(self, starting: bool) -> None:
         self._conversation_starting = starting
@@ -802,6 +872,9 @@ class MainWindow(QMainWindow):
     def _start_fresh_conversation(self) -> None:
         self._conversation_starting = False
         self._model_switching = False
+        self._conversation_started_at = None
+        self._duration_frozen = False
+        self.duration_label.setText("")
         self._new_controller()
         self.log.clear()
         self.stack.setCurrentWidget(self.welcome)
@@ -982,6 +1055,11 @@ class MainWindow(QMainWindow):
             active_profile_name=self.model_combo.currentData() or active_profile,
             default_plan_model=self._settings.value("default_plan_model_name") or None,
             default_code_model=self._settings.value("default_code_model_name") or None,
+            auto_decide_plan_code=self._auto_decide_plan_code,
+            lm_studio_context_length=self._settings.value(
+                "lm_studio_context_length", DEFAULT_LM_STUDIO_CONTEXT_LENGTH, type=int
+            ),
+            auto_supervise=self._auto_supervise,
         )
         self._settings_dialog.profile_activate_requested.connect(self._activate_llm_profile)
         self._settings_dialog.profiles_changed.connect(
@@ -993,6 +1071,9 @@ class MainWindow(QMainWindow):
         self._settings_dialog.default_code_model_changed.connect(
             lambda name: self._settings.setValue("default_code_model_name", name)
         )
+        self._settings_dialog.auto_decide_plan_code_changed.connect(self._on_auto_plan_toggled)
+        self._settings_dialog.lm_studio_context_length_changed.connect(self._on_context_length_changed)
+        self._settings_dialog.auto_supervise_changed.connect(self._on_auto_supervise_toggled)
         # Custom instructions are read once at startup and delivered per
         # conversation, so re-read them when the dialog closes -- otherwise
         # an edit would not take effect until the app restarts.
@@ -1044,6 +1125,93 @@ class MainWindow(QMainWindow):
             if previous == default_model:
                 asyncio.ensure_future(self._activate_profile_async(default_model))
 
+    _MODE_SETTINGS = {
+        "bypass": (False, "none"),
+        "auto": (False, "llm"),
+        "manual": (True, "llm"),
+    }
+
+    def _on_mode_changed(self, _index: int) -> None:
+        mode = self.mode_combo.currentData()
+        confirmation_mode, security_analyzer = self._MODE_SETTINGS[mode]
+        asyncio.ensure_future(
+            self._push_mode_settings(confirmation_mode, security_analyzer)
+        )
+
+    def _on_auto_plan_toggled(self, checked: bool) -> None:
+        self._auto_decide_plan_code = checked
+        self._settings.setValue("auto_decide_plan_code", checked)
+
+    def _on_context_length_changed(self, value: int) -> None:
+        self._settings.setValue("lm_studio_context_length", value)
+        asyncio.ensure_future(self._sync_context_derived_settings(value))
+
+    def _on_auto_supervise_toggled(self, checked: bool) -> None:
+        self._auto_supervise = checked
+        self._settings.setValue("auto_supervise", checked)
+        # Applies immediately to whatever conversation is already running,
+        # not just the next one -- flipping this mid-run shouldn't need a
+        # restart to take effect.
+        if checked and self._watchdog is None and self._controller is not None:
+            self._watchdog = ConversationWatchdog(self._controller, on_step=self._on_watchdog_step)
+        elif not checked and self._watchdog is not None:
+            self._watchdog.detach()
+            self._watchdog = None
+
+    async def _sync_context_derived_settings(self, context_length: int) -> None:
+        """Keeps max_input_tokens (per local profile) and condenser.max_tokens
+        (global) proportional to the LM Studio context length setting, using
+        the same ratios verified live 2026-07-31 at context_length=131072
+        (max_input_tokens=110000, condenser.max_tokens=90000) -- enough
+        headroom below the actual loaded context for output tokens and
+        per-request overhead without wasting most of a larger context on
+        margin. Only touches profiles pointing at this app's own LM Studio
+        bridge address; a cloud/remote profile's limits have nothing to do
+        with this machine's GPU."""
+        max_input_tokens = round(context_length * 110000 / 131072)
+        condenser_max_tokens = round(context_length * 90000 / 131072)
+        local = profile_base_url("http://127.0.0.1:1234/v1")
+        try:
+            await self._client.update_settings(
+                {"agent_settings_diff": {"condenser": {"max_tokens": condenser_max_tokens}}}
+            )
+            profiles, _ = await self._client.list_llm_profiles()
+            updated = 0
+            for profile in profiles:
+                if not same_server(profile.base_url, local):
+                    continue
+                detail = await self._client.get_profile_detail(profile.name)
+                config = detail.get("config") or {}
+                await self._client.save_profile(
+                    profile.name,
+                    model=profile.model,
+                    base_url=profile.base_url,
+                    preserve_existing_api_key=True,
+                    max_input_tokens=max_input_tokens,
+                    extra_config=config,
+                )
+                updated += 1
+        except Exception as exc:  # noqa: BLE001
+            self._on_error(f"Could not sync context-derived settings: {exc}")
+            return
+        self._append_log(
+            f"Synced to context length {context_length}: max_input_tokens={max_input_tokens} "
+            f"on {updated} local profile(s), condenser.max_tokens={condenser_max_tokens}.",
+            kind="system",
+        )
+
+    async def _push_mode_settings(self, confirmation_mode: bool, security_analyzer: str) -> None:
+        payload = {
+            "conversation_settings_diff": {
+                "confirmation_mode": confirmation_mode,
+                "security_analyzer": security_analyzer,
+            }
+        }
+        try:
+            await self._client.update_settings(payload)
+        except Exception as exc:  # noqa: BLE001
+            self._on_error(f"Could not update verification settings: {exc}")
+
     async def _activate_profile_async(self, profile_name: str) -> None:
         if self._model_switching:
             return
@@ -1059,7 +1227,10 @@ class MainWindow(QMainWindow):
         profile = self._profiles_by_name.get(profile_name)
         if profile is None:
             raise LookupError(f"LLM profile {profile_name!r} was not found")
-        await ensure_profile_model_loaded(profile_name, profile.model)
+        context_length = self._settings.value(
+            "lm_studio_context_length", DEFAULT_LM_STUDIO_CONTEXT_LENGTH, type=int
+        )
+        await ensure_profile_model_loaded(profile_name, profile.model, context_length=context_length)
         await self._client.activate_profile(profile_name)
         self._check_loaded_model()
 
@@ -1556,7 +1727,16 @@ class MainWindow(QMainWindow):
             self._remember_user_message(text)
             profile_name = self.model_combo.currentData()
             model = self._selected_model()
-            agent_type = self.agent_type_combo.currentData()
+            # None means "not decided yet" -- resolved in
+            # _start_new_after_model_ready by classify_plan_or_code. Only
+            # applies when the combo is still at its Code default; an
+            # explicit manual Plan pick always wins over auto-decide.
+            manual_agent_type = self.agent_type_combo.currentData()
+            agent_type = (
+                None
+                if self._auto_decide_plan_code and manual_agent_type != "plan"
+                else manual_agent_type
+            )
             self._current_agent_type = agent_type
             self._pending_model = model
             self._pending_title = text[:80]
@@ -1575,7 +1755,7 @@ class MainWindow(QMainWindow):
             self._controller.send_message(text)
 
     async def _start_new_after_model_ready(
-        self, *, text: str, profile_name: str | None, model: str | None, agent_type: str
+        self, *, text: str, profile_name: str | None, model: str | None, agent_type: str | None
     ) -> None:
         controller = self._controller
         ready = False
@@ -1590,6 +1770,18 @@ class MainWindow(QMainWindow):
             self._set_model_switching(False)
         if not ready or controller is not self._controller:
             return
+        if agent_type is None:
+            agent_type = await self._classify_plan_or_code(text, profile_name)
+            index = self.agent_type_combo.findData(agent_type)
+            if index >= 0:
+                self.agent_type_combo.blockSignals(True)
+                self.agent_type_combo.setCurrentIndex(index)
+                self.agent_type_combo.blockSignals(False)
+            self._current_agent_type = agent_type
+            self._append_log(
+                f"[Auto-decide: starting as {'Plan' if agent_type == 'plan' else 'Code'}]",
+                kind="system",
+            )
         self.agent_type_combo.setEnabled(False)
         controller.start_new(
             llm_model=model,
@@ -1597,6 +1789,16 @@ class MainWindow(QMainWindow):
             agent_type=agent_type,
             system_message_suffix=self._custom_instructions(),
         )
+
+    async def _classify_plan_or_code(self, text: str, profile_name: str | None) -> str:
+        profile = self._profiles_by_name.get(profile_name) if profile_name else None
+        if profile is None or not profile.base_url:
+            return "default"
+        try:
+            mode = await classify_plan_or_code(profile.base_url, profile.model, text)
+        except Exception:  # noqa: BLE001 -- classification is a convenience, never blocks sending
+            return "default"
+        return "plan" if mode == "plan" else "default"
 
     def _custom_instructions(self) -> str | None:
         """Custom agent instructions, passed per-conversation.
@@ -1637,6 +1839,9 @@ class MainWindow(QMainWindow):
         self.changes_btn.setEnabled(True)
         self.mempalace_btn.setEnabled(True)
         self.browser_preview_btn.setEnabled(True)
+        self._conversation_started_at = datetime.now()
+        self._duration_frozen = False
+        self._update_duration_label()
         if self._is_resuming:
             # Reattaching, not creating -- don't touch the history record's
             # title/model. _on_state_changed will update its status shortly
@@ -1651,7 +1856,26 @@ class MainWindow(QMainWindow):
         )
         await self._refresh_sidebar_history_async()
 
+    _TERMINAL_STATES = (RunState.COMPLETED, RunState.FINISHED_UNVERIFIED, RunState.ERROR, RunState.STUCK)
+
+    def _update_duration_label(self) -> None:
+        if self._conversation_started_at is None or self._duration_frozen:
+            return
+        elapsed = int((datetime.now() - self._conversation_started_at).total_seconds())
+        minutes, seconds = divmod(elapsed, 60)
+        hours, minutes = divmod(minutes, 60)
+        text = f"{hours}h {minutes}m {seconds}s" if hours else f"{minutes}m {seconds}s"
+        self.duration_label.setText(text)
+
     def _on_state_changed(self, state: RunState) -> None:
+        if state in self._TERMINAL_STATES:
+            # Freeze instead of continuing to tick through idle time after
+            # the agent is actually done -- "how long this ran", not "how
+            # long since it started including time spent waiting".
+            self._update_duration_label()
+            self._duration_frozen = True
+        elif self._duration_frozen and state == RunState.RUNNING:
+            self._duration_frozen = False
         label, style_name = STATE_LABELS.get(state, (str(state), ""))
         self.state_label.setText(label)
         self.state_label.setObjectName(style_name)
@@ -1669,9 +1893,14 @@ class MainWindow(QMainWindow):
         # Code's Orchestrator): once a Plan conversation reaches a terminal
         # state, offer to hand its output to a fresh Code conversation
         # instead of the user copying it over by hand.
-        self.continue_as_code_btn.setVisible(
-            self._current_agent_type == "plan" and state in (RunState.COMPLETED, RunState.FINISHED_UNVERIFIED)
+        plan_finished = self._current_agent_type == "plan" and state in (
+            RunState.COMPLETED,
+            RunState.FINISHED_UNVERIFIED,
         )
+        self.continue_as_code_btn.setVisible(plan_finished)
+        if plan_finished and self.auto_continue_as_code_check.isChecked() and not self._auto_continue_triggered:
+            self._auto_continue_triggered = True
+            self._continue_as_code()
         # Community-reported Qwen A3B/27B failure mode (2026-07-28 research):
         # the model can get stuck re-trying the same search/reasoning instead
         # of making progress. The server's own stuck-detector already
@@ -1681,7 +1910,15 @@ class MainWindow(QMainWindow):
         # it per run so a genuinely broken loop still falls back to the
         # manual button instead of nudging forever.
         if state == RunState.STUCK:
-            if self._auto_nudge_count_for_run < _MAX_AUTO_NUDGES_PER_RUN and not self._auto_nudge_in_flight:
+            if self._auto_supervise:
+                # ConversationWatchdog already interrupts and nudges/stops on
+                # its own, proactively, from hash-dedup on the live event
+                # stream -- by the time the SDK's own (reactive, less
+                # configurable) stuck detector fires this state, the
+                # watchdog has already handled it. Firing this ad-hoc nudge
+                # too would double up on the same stuck run.
+                pass
+            elif self._auto_nudge_count_for_run < _MAX_AUTO_NUDGES_PER_RUN and not self._auto_nudge_in_flight:
                 self._auto_nudge_count_for_run += 1
                 self.stuck_nudge_btn.setVisible(False)
                 asyncio.ensure_future(self._auto_interrupt_and_nudge())
@@ -1691,6 +1928,20 @@ class MainWindow(QMainWindow):
                 self.stuck_nudge_btn.setVisible(not self._auto_nudge_in_flight)
         else:
             self.stuck_nudge_btn.setVisible(False)
+
+    def _on_watchdog_step(self, event: dict) -> None:
+        """ConversationWatchdog only reports the events worth surfacing --
+        action/observation/state are already visible via the normal
+        events_received -> log path, so only nudge/stuck (and error, which
+        _on_error already handles) are logged here."""
+        kind = event.get("kind")
+        if kind == "nudge":
+            self._append_log(
+                f"[Auto-supervise: repeated tool call ({event.get('tool')}) -- nudging]",
+                kind="system",
+            )
+        elif kind == "stuck":
+            self._append_log(f"[Auto-supervise: stopped -- {event.get('reason')}]", kind="system")
 
     _NUDGE_TEXT = (
         "You seem to be stuck repeating the same searches or reasoning without making "
@@ -1734,6 +1985,9 @@ class MainWindow(QMainWindow):
         self.stuck_nudge_btn.setVisible(False)
         self.input.setPlainText(self._NUDGE_TEXT)
         self.input.setFocus()
+
+    def _on_auto_continue_as_code_toggled(self, checked: bool) -> None:
+        self._settings.setValue("auto_continue_as_code", checked)
 
     def _continue_as_code(self) -> None:
         asyncio.ensure_future(self._continue_as_code_async())
@@ -1912,6 +2166,12 @@ class MainWindow(QMainWindow):
         coroutine (same qasync loop) -- shown non-modally via .open(), same
         reason as _on_agent_question: .exec() would spin a nested Qt loop
         and stall the very MCP request waiting on this answer."""
+        if self.mode_combo.currentData() == "bypass":
+            self._append_log(
+                f"Agent connected your folder without asking (Bypass permissions mode): {path}",
+                kind="system",
+            )
+            return True
         self._append_log(
             f"Agent wants to connect your folder: {path}", kind="system"
         )
@@ -1921,6 +2181,12 @@ class MainWindow(QMainWindow):
         )
 
     async def _confirm_workspace_write(self, path: str, content: str) -> bool:
+        if self.mode_combo.currentData() == "bypass":
+            self._append_log(
+                f"Agent wrote a file without asking (Bypass permissions mode): {path}",
+                kind="system",
+            )
+            return True
         preview = content if len(content) <= 2000 else content[:2000] + "\n... [truncated]"
         return await self._confirm_dialog(
             "Write file?",
@@ -2113,12 +2379,15 @@ class MainWindow(QMainWindow):
         meta: dict | None = None,
         code: str | None = None,
     ) -> None:
-        if kind == "error":
+        if kind == "error" and "is not a valid directory" not in text.lower():
             # Single choke point: every error in this conversation --
             # controller.error_occurred, AGENT_ERROR events, local
             # validation messages -- ends up as an append_log(kind="error")
             # call somewhere, so tracking it here catches all of them
-            # without touching each call site individually.
+            # without touching each call site individually. Excludes the
+            # "not a valid directory" sandbox-path-probe message (see
+            # log_view.append_entry's matching remap) -- not a real error,
+            # so it shouldn't inflate the Errors panel count either.
             self._error_history.append((timestamp or datetime.now(), text))
             self._update_errors_button()
         self.log.append_entry(

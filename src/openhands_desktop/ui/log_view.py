@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PySide6.QtCore import QPointF, Qt, Signal
+from PySide6.QtCore import QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -109,31 +109,6 @@ def _check_circle_pixmap(size: int = 16, color: str = "#23C995") -> QPixmap:
     return pixmap
 
 
-def _check_mark_pixmap(size: int = 13, color: str = "#3FE0A6") -> QPixmap:
-    """Bare checkmark stroke, no circle/box around it -- for the Completed
-    pill, matching thinking-card.svg's plain check path exactly. A drawn
-    pixmap rather than a "✓" text glyph: some fallback fonts render that
-    character with its own visible box, which is the boxed look this
-    replaces."""
-    pixmap = QPixmap(size, size)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    pen = painter.pen()
-    pen.setColor(QColor(color))
-    pen.setWidthF(size * 0.16)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    painter.setPen(pen)
-    painter.drawPolyline([
-        QPointF(size * 0.06, size * 0.52),
-        QPointF(size * 0.38, size * 0.82),
-        QPointF(size * 0.96, size * 0.18),
-    ])
-    painter.end()
-    return pixmap
-
-
 # kind -> (card border color, header label, header text color)
 _CARD_STYLE = {
     "user": (BORDER, "You", TEXT_PRIMARY),
@@ -183,27 +158,6 @@ class _StatusPill(QWidget):
         )
 
 
-def _completed_pill() -> QFrame:
-    """The Thinking card's "done" indicator -- plain text + checkmark, no
-    background/border box (2026-07-31: the pill shape read as an odd empty
-    rectangle to the user, so the box was dropped and just the two labels
-    kept)."""
-    pill = QFrame()
-    pill.setObjectName("CompletedPill")
-    pill.setStyleSheet("#CompletedPill { background: transparent; border: none; }")
-    layout = QHBoxLayout(pill)
-    layout.setContentsMargins(0, 0, 0, 0)
-    layout.setSpacing(6)
-    text = QLabel("Completed")
-    text.setStyleSheet("color: #C9D6E2; font-size: 13px; background: transparent; border: none;")
-    layout.addWidget(text)
-    check = QLabel()
-    check.setPixmap(_check_mark_pixmap(13))
-    check.setStyleSheet("background: transparent; border: none;")
-    layout.addWidget(check)
-    return pill
-
-
 class LogView(QScrollArea):
     # Emitted when the user clicks Retry on an error card -- the view has
     # no controller reference itself, so the owner (MainWindow) is the one
@@ -245,6 +199,18 @@ class LogView(QScrollArea):
         # "every word gets its own card" during a long reasoning burst.
         self._pending_thinking: dict | None = None
 
+        # 2026-07-31: thinking + tool_call/tool_result no longer get their
+        # own top-level timeline rows -- they're the noise a user doesn't
+        # usually need to see step by step. Instead they collapse into one
+        # "Working" card per turn (collapsed by default, click to expand the
+        # full sequence), whose header text tracks what's happening right
+        # now ("Thinking…", "Running terminal…"). Only the user's own
+        # message and the agent's real reply stay as separate, always-
+        # visible rows. A new user message or the agent's final answer ends
+        # the current group; the next thinking/tool_call after that opens a
+        # fresh one.
+        self._active_group: dict | None = None
+
     # -- public API (unchanged signature from the previous bubble-log) -----
 
     def append_entry(
@@ -258,6 +224,15 @@ class LogView(QScrollArea):
         meta: dict | None = None,
         code: str | None = None,
     ) -> None:
+        # Not a real failure -- just the agent probing a host path inside its
+        # own sandbox before it has actually connected that folder via
+        # connect_folder (see workspace_server.py). Expected mid-workflow
+        # noise, not something the user needs to see as a red alarm with a
+        # Retry button (confirmed live 2026-07-31: this exact message shows
+        # up right before the connect_folder confirmation dialog, every time).
+        if kind == "error" and "is not a valid directory" in text.lower():
+            kind = "system"
+
         label_prefix = title or kind
         self._entries.append(f"{label_prefix}: {text}" if kind != "user" else text)
         time_text = (timestamp or datetime.now()).strftime("%H:%M")
@@ -276,23 +251,39 @@ class LogView(QScrollArea):
             return
 
         if kind == "tool_call":
-            self._new_tool_call_row(text, time_text, code=code)
+            self._group_new_tool_call(text, time_text, code=code)
         elif kind == "thinking":
             if self._pending_thinking is not None:
                 self._append_thinking_chunk(text)
             else:
-                self._new_thinking_row(text, time_text)
-        elif kind in ("user", "agent", "error", "system"):
+                self._group_new_thinking(text, time_text)
+        elif kind in ("user", "agent", "error"):
+            # What was asked, the real answer, and a genuine error (LLM/infra
+            # failures like a context-size overflow -- actionable, worth
+            # seeing immediately) all get their own always-visible row.
+            # Everything else (thinking, tool calls, system notices, and the
+            # benign "not a valid directory" probe remapped to "system"
+            # above) folds into the collapsed Working group instead, per
+            # 2026-07-31 request: "jedine čo sa má mať nové políčko je
+            # otázka a odpoveď" -- refined the same day to keep real errors
+            # separate after a real context-size error showed up folded in
+            # and easy to miss.
+            self._active_group = None
             self._new_plain_row(kind, text, time_text)
         else:
-            # tool_result/error with no pending call (backfill edge case,
-            # or a result that arrived after a history reload) -- still
-            # show it rather than silently dropping the content.
-            self._new_plain_row("system", f"{label_prefix}: {text}", time_text)
+            # "system" notices (workspace confirmations, raw MCP tool
+            # echoes) and tool_result/error with no pending call (an MCP
+            # tool's own observation, a backfill edge case, or a result that
+            # arrived after a history reload) -- all mid-turn noise, folded
+            # into the group same as everything else.
+            note = text if kind == "system" else f"{label_prefix}: {text}"
+            self._group_new_note(note, time_text)
 
     def clear(self) -> None:
         self._entries.clear()
         self._pending_tool = None
+        self._pending_thinking = None
+        self._active_group = None
         while self._layout.count() > 1:  # keep the trailing stretch
             item = self._layout.takeAt(0)
             widget = item.widget()
@@ -473,7 +464,13 @@ class LogView(QScrollArea):
         button.clicked.connect(lambda: QApplication.clipboard().setText(text))
         return button
 
-    def _new_thinking_row(self, text: str, time_text: str) -> None:
+    def _ensure_activity_group(self, time_text: str) -> dict:
+        """The one collapsed "Working" card a turn's thinking/tool_call
+        events land in -- created on first use, reused until a plain row
+        (user/agent/error/system) closes it. See _active_group's docstring
+        in __init__ for why this exists."""
+        if self._active_group is not None:
+            return self._active_group
         card, layout = self._new_card(COLOR_THINKING_BORDER)
         card.setStyleSheet(
             f"#TimelineCard {{ background-color: {COLOR_THINKING_BG}; "
@@ -484,32 +481,71 @@ class LogView(QScrollArea):
         icon_label = QLabel()
         icon_label.setPixmap(thinking_icon(16).pixmap(16, 16))
         header.addWidget(icon_label)
-        name = QLabel("Thinking")
-        name.setStyleSheet(
+        status_label = QLabel("Working…")
+        status_label.setStyleSheet(
             f"color: {COLOR_THINKING_ACCENT}; font-weight: 700; font-size: 13px; background: transparent;"
         )
-        header.addWidget(name)
+        header.addWidget(status_label)
         header.addStretch(1)
-        # Reasoning is streamed in and read back after the fact -- by the
-        # time it's visible in the log the chunk is already settled, so
-        # "Completed" is accurate here (there's no separate "reasoning
-        # just started" signal from the server to justify a Running state).
-        header.addWidget(_completed_pill())
         toggle = self._make_toggle()
+        toggle.setToolTip("Show thinking and tool calls for this turn")
         header.addWidget(toggle)
         layout.addLayout(header)
 
-        body = self._body_label(text, color=COLOR_THINKING_TEXT)
-        body.setVisible(False)
-        layout.addWidget(body)
+        body_container = QWidget()
+        body_container.setStyleSheet("background: transparent;")
+        body_layout = QVBoxLayout(body_container)
+        body_layout.setContentsMargins(0, SPACE_XS, 0, 0)
+        body_layout.setSpacing(SPACE_XS)
+        body_container.setVisible(False)
+        layout.addWidget(body_container)
         toggle.toggled.connect(
-            lambda checked, b=toggle, w=body: (
+            lambda checked, b=toggle, w=body_container: (
                 b.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow),
                 w.setVisible(checked),
             )
         )
 
         self._add_timeline_row(time_text, COLOR_THINKING_ACCENT, card)
+        self._active_group = {"status_label": status_label, "body_layout": body_layout}
+        return self._active_group
+
+    def _group_sub_card(self, border_color: str) -> tuple[QFrame, QVBoxLayout]:
+        frame = QFrame()
+        frame.setObjectName("GroupSubCard")
+        frame.setStyleSheet(
+            f"#GroupSubCard {{ background-color: rgba(255, 255, 255, 10); "
+            f"border: 1px solid {border_color}; border-radius: {RADIUS_MD}px; }}"
+        )
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(SPACE_SM, SPACE_XXS, SPACE_SM, SPACE_XXS)
+        layout.setSpacing(SPACE_XXS)
+        return frame, layout
+
+    def _set_group_status(self, group: dict, text: str, color: str = COLOR_THINKING_ACCENT) -> None:
+        group["status_label"].setText(text)
+        group["status_label"].setStyleSheet(
+            f"color: {color}; font-weight: 700; font-size: 13px; background: transparent;"
+        )
+
+    def _group_new_thinking(self, text: str, time_text: str) -> None:
+        group = self._ensure_activity_group(time_text)
+        self._set_group_status(group, "Thinking…")
+        frame, layout = self._group_sub_card(COLOR_THINKING_BORDER)
+        header = self._header_row()
+        icon_label = QLabel()
+        icon_label.setPixmap(thinking_icon(14).pixmap(14, 14))
+        header.addWidget(icon_label)
+        name = QLabel("Thinking")
+        name.setStyleSheet(
+            f"color: {COLOR_THINKING_ACCENT}; font-weight: 700; font-size: 12px; background: transparent;"
+        )
+        header.addWidget(name)
+        header.addStretch(1)
+        layout.addLayout(header)
+        body = self._body_label(text, color=COLOR_THINKING_TEXT)
+        layout.addWidget(body)
+        group["body_layout"].addWidget(frame)
         self._pending_thinking = {"body": body, "text": text}
 
     def _append_thinking_chunk(self, text: str) -> None:
@@ -519,50 +555,33 @@ class LogView(QScrollArea):
         pending["body"].setProperty("raw_text", combined)
         pending["body"].setText(_with_soft_wrap_points(combined))
 
-    def _new_tool_call_row(self, tool_name: str, time_text: str, *, code: str | None = None) -> None:
-        icon_qicon = tool_call_icon(tool_name, 20)
-        # tool_call_icon's own color choice doubles as the card's accent --
-        # the card's color communicates *what kind* of call this is, status
-        # is the separate pill, never the card's own fill.
+    def _group_new_tool_call(self, tool_name: str, time_text: str, *, code: str | None = None) -> None:
+        group = self._ensure_activity_group(time_text)
+        self._set_group_status(group, f"Running {tool_name}…")
+        # tool_call_icon's own color choice doubles as the sub-card's
+        # accent -- communicates *what kind* of call this is, status stays
+        # the separate pill, never the card's own fill.
         accent = tool_accent_color(tool_name)
-        card, layout = self._new_card(accent)
+        frame, layout = self._group_sub_card(accent)
 
         header = self._header_row()
         icon_label = QLabel()
-        icon_label.setPixmap(icon_qicon.pixmap(20, 20))
+        icon_label.setPixmap(tool_call_icon(tool_name, 14).pixmap(14, 14))
         header.addWidget(icon_label)
-
-        titles = QVBoxLayout()
-        titles.setContentsMargins(0, 0, 0, 0)
-        titles.setSpacing(0)
-        caption = QLabel("Tool call")
-        caption.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 11px; background: transparent;")
-        titles.addWidget(caption)
         name = QLabel(tool_name)
         name.setStyleSheet(
-            f"color: {TEXT_PRIMARY}; font-weight: 700; font-size: 14px; background: transparent;"
+            f"color: {TEXT_PRIMARY}; font-weight: 700; font-size: 12px; background: transparent;"
         )
-        titles.addWidget(name)
-        header.addLayout(titles)
+        header.addWidget(name)
         header.addStretch(1)
-
         pill = _StatusPill("running")
         header.addWidget(pill)
-        toggle = self._make_toggle()
-        toggle.setEnabled(False)  # nothing to expand until the result arrives
-        header.addWidget(toggle)
         layout.addLayout(header)
-
-        divider = QFrame()
-        divider.setFrameShape(QFrame.Shape.HLine)
-        divider.setStyleSheet(f"background-color: {BORDER}; max-height: 1px; border: none;")
-        divider.setVisible(False)
-        layout.addWidget(divider)
 
         meta_container = QWidget()
         meta_container.setStyleSheet("background: transparent;")
         meta_layout = QVBoxLayout(meta_container)
-        meta_layout.setContentsMargins(0, 6, 0, 4)
+        meta_layout.setContentsMargins(0, 4, 0, 2)
         meta_layout.setSpacing(2)
         meta_container.setVisible(False)
         layout.addWidget(meta_container)
@@ -570,19 +589,25 @@ class LogView(QScrollArea):
         body = self._body_label("", monospace=True)
         body.setVisible(False)
         layout.addWidget(body)
-        toggle.toggled.connect(
-            lambda checked, b=toggle, w=body, m=meta_container, d=divider: (
-                b.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow),
-                w.setVisible(checked),
-                m.setVisible(checked and m.layout().count() > 0),
-                d.setVisible(checked),
-            )
-        )
 
-        self._add_timeline_row(time_text, accent, card)
+        group["body_layout"].addWidget(frame)
         self._pending_tool = {
-            "pill": pill, "body": body, "toggle": toggle, "meta_container": meta_container, "code": code,
+            "pill": pill, "body": body, "meta_container": meta_container, "code": code, "group": group,
         }
+
+    def _group_new_note(
+        self, text: str, time_text: str, *, status: str | None = None, color: str = TEXT_MUTED
+    ) -> None:
+        """Everything that isn't thinking, a tool call, or Q&A -- system
+        notices, raw MCP echoes, top-level errors with no pending tool call.
+        A plain line inside the Working group rather than its own sub-card:
+        there's no structured content here worth a header/toggle of its own."""
+        group = self._ensure_activity_group(time_text)
+        if status is not None:
+            self._set_group_status(group, status, color)
+        label = self._body_label(text, color=color)
+        label.setStyleSheet(f"background: transparent; font-size: 12px; color: {color};")
+        group["body_layout"].addWidget(label)
 
     def _resolve_pending_tool(self, status: str, text: str, meta: dict | None = None) -> None:
         pending = self._pending_tool
@@ -590,11 +615,9 @@ class LogView(QScrollArea):
         if pending is None:
             return
         pending["pill"].set_status(status)
-        # Shown together once expanded: what was actually run/written (the
-        # action's own code/arguments -- collapsed by default, same as
-        # Thinking, so a long file write doesn't flood the log), then its
-        # result, so a click answers both "what did it do" and "what came
-        # back" in one place.
+        # Already sitting inside the collapsed Working group, so no second
+        # layer of collapsing here -- what ran and what it returned are just
+        # shown once the result lands.
         code = pending.get("code")
         combined = f"{code}\n\n--- result ---\n{text}" if code else text
         pending["body"].setProperty("raw_text", combined)
@@ -604,9 +627,13 @@ class LogView(QScrollArea):
             "background: transparent; font-size: 13px; "
             f"color: {color}; font-family: 'JetBrains Mono', 'Fira Code', monospace;"
         )
+        pending["body"].setVisible(True)
         if meta and any(meta.get(k) not in (None, "") for k in ("command", "working_dir", "exit_code")):
             self._populate_meta(pending["meta_container"], meta)
-        pending["toggle"].setEnabled(True)
+            pending["meta_container"].setVisible(True)
+        group = pending.get("group")
+        if group is not None:
+            self._set_group_status(group, "Working…")
 
     def _populate_meta(self, container: QWidget, meta: dict) -> None:
         """Structured Command/Working directory/Exit code/Duration block --
@@ -661,5 +688,13 @@ class LogView(QScrollArea):
         # handler is what actually shows it (this only fills content in).
 
     def _scroll_to_bottom(self) -> None:
+        # bar.maximum() right after insertWidget() still reflects the layout
+        # from *before* this row -- Qt hasn't recomputed geometry yet, so
+        # this landed short of the real bottom whenever a card was tall
+        # (multi-line agent replies, tool output). Deferring one event-loop
+        # tick lets the layout pass happen first.
+        QTimer.singleShot(0, self._scroll_to_bottom_now)
+
+    def _scroll_to_bottom_now(self) -> None:
         bar = self.verticalScrollBar()
         bar.setValue(bar.maximum())
