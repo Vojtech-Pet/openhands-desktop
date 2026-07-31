@@ -2,6 +2,23 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-07-31 — Continue-as-Code status/sidebar fixes, family-aware delete, live LLM toggle push
+
+- `search_conversations()` was missing `include_sub_conversations=true` -- Continue-as-Code children were completely invisible to Mission Control and to the "is anything else running" safety check used before unloading the model.
+- Deleting a conversation now resolves and deletes its whole Plan/Code family (parent + sub-conversations), not just the one id clicked -- a Continue-as-Code pair shares one sandbox container server-side, which the server only tears down once every conversation referencing it is gone.
+- Continue-as-Code swaps the Plan sidebar entry's id in place instead of inserting a second row for the same task; the old Plan controller is disconnected before the model-switch wait instead of after, so its status polling can't overwrite a fresh "running" write.
+- Sidebar status writes are now serialized so out-of-order DB writes can't leave a stale status on screen.
+- New "Continued as Code" status (from the server's own `sub_conversation_ids`) replaces a misleading plain "Finished" after reattaching to an already-continued Plan conversation.
+- `FINISHED_UNVERIFIED` relabeled "Waiting" (was "Finished (unverified)").
+- Fixed a real status-flicker/frozen-timer bug: a status poll and a live event race in either order, so a stale "finished"/"error" poll reading could flip the label back after a correct update. Any real event within 8s of "now" now overrides a stale terminal reading regardless of arrival order.
+- Continue-as-Code's initial message now explicitly tells the Code agent to read `.agents_tmp/PLAN.md` first and reconnect the real host folder via `workspace_connect_folder` (its sandbox doesn't inherit the Plan sandbox's connection) -- this was the actual cause of a Code agent wandering into curl/browser exploration instead of implementing anything.
+- Code-mode instructions gained an explicit override for the SDK's built-in "propose a new plan" troubleshooting guidance; the plan-continuation-specific note is now only appended when the conversation was actually continued from a Plan.
+- Plan-mode instructions rewritten much more strictly after the softer version still let an agent behave as if it had a terminal.
+- New instruction: always call `finish` explicitly as the last action.
+- Switching Thinking/Keep for a profile driving a running conversation now applies immediately via the sandbox's own `switch_llm` endpoint, instead of only affecting the next new conversation.
+- New "Unload" button next to the model chip to free VRAM on demand.
+- Mission Control gained a "Delete all" action with visible progress and a failure tally.
+
 ## 2026-07-31 — DIFFERENCES.md, single-instance guard, Plan/Code role instructions
 
 - Added `DIFFERENCES.md`/`DIFFERENCES.en.md` documenting what this app adds on top of stock OpenHands.
