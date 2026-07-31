@@ -2086,7 +2086,14 @@ class MainWindow(QMainWindow):
         "verification commands Code must run, risks/open questions, and a final "
         "handoff note. If the user asks you to make a script while in Plan mode, "
         "do not write the script; write a plan step telling Code exactly what "
-        "script to create and what behavior it must have."
+        "script to create and what behavior it must have.\n\n"
+        "You do NOT have launch_subagent/sub-agent delegation in this mode "
+        "(confirmed live -- it is not in your tool list) -- do not search "
+        "for it or try to work around its absence. If the task involves "
+        "the local project project modules (local-project/download_modules), "
+        "write into PLAN.md that the Code agent must delegate this work to "
+        "the project-module-engineer subagent via launch_subagent "
+        "-- that is Code's job to do, not yours."
     )
 
     _CODE_MODE_NOTE = (
@@ -2102,7 +2109,19 @@ class MainWindow(QMainWindow):
         "(write_file needs a separate confirmation per call).\n\n"
         "Before calling finish: confirm the actual change exists on disk "
         "(read the file back, or run the test/build) -- do not call finish "
-        "based on believing a previous step succeeded without checking."
+        "based on believing a previous step succeeded without checking.\n\n"
+        "Mandatory delegation for the local project project work: if the task "
+        "involves adding, fixing, or investigating anything under "
+        "local-project/download_modules (a new video site, a broken "
+        "module, a page hiding its real media URL), ALWAYS call "
+        "launch_subagent with agent type \"project-module-engineer\" "
+        "as your first action for that task -- do not investigate or "
+        "implement it yourself first. That subagent has the full "
+        "site-specific extraction playbook (known site patterns, "
+        "crypto/obfuscation handling, the module contract); doing the work "
+        "directly instead of delegating skips all of that. This overrides "
+        "the general \"use subagents only when the task genuinely "
+        "benefits\" guidance for this specific category of task."
     )
 
     # Only appended when this Code conversation was actually started via
