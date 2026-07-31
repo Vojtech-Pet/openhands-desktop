@@ -2,6 +2,10 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-08-01 — Reasoning/thinking is its own visible row again, not folded into Working
+
+- Reversal of the "fold thinking into the collapsed Working card" design from the day before: confirmed live via screenshot that the model's reasoning channel is where the app's own narration instructions ("Looking for X", "Found it: Y") actually land, so collapsing it made exactly that narration easy to miss. Reasoning now renders as its own always-visible row, styled like an agent reply, growing in place as it streams. Tool calls/results and system notices still fold into Working as before -- only "thinking" moved.
+
 ## 2026-08-01 — Flash the taskbar icon when a background window's agent replies
 
 - With two windows open, a real agent reply in the window you're not looking at was easy to miss entirely. A lighter, non-intrusive notification (taskbar/dock flash only, no stolen focus) now fires whenever a genuine agent message or finish() lands in a window that isn't currently active.
