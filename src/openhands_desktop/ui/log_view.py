@@ -340,12 +340,6 @@ class LogView(QScrollArea):
     # -- row builders --------------------------------------------------------
 
     def _add_timeline_row(self, time_text: str, dot_color: str, card: QWidget) -> None:
-        bar = self.verticalScrollBar()
-        # Read *before* inserting: appending a row raises bar.maximum(), so
-        # this has to reflect where the user actually was a moment ago, not
-        # where "bottom" ends up after the new content lands.
-        was_at_bottom = bar.value() >= bar.maximum() - self._AT_BOTTOM_TOLERANCE_PX
-
         row = QWidget()
         row.setStyleSheet("background: transparent;")
         row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -356,11 +350,13 @@ class LogView(QScrollArea):
         row_layout.addWidget(card, 1)
         self._layout.insertWidget(self._layout.count() - 1, row)
 
-        # Only follow the stream if the user was already reading the live
-        # edge -- scrolled up to reread an earlier step must not get yanked
-        # back down by the next incoming event.
-        if was_at_bottom:
-            self._scroll_to_bottom()
+        # 2026-08-01: always follow the live edge now, even if the user had
+        # scrolled up -- explicit request, reversing the previous
+        # "only if already at bottom" behavior (which was itself an
+        # earlier explicit request). New content should always be visible
+        # immediately, especially across windows/tabs where the log was
+        # last left scrolled somewhere else.
+        self._scroll_to_bottom()
 
     def _build_rail(self, time_text: str, dot_color: str) -> QWidget:
         rail = QWidget()
@@ -613,17 +609,10 @@ class LogView(QScrollArea):
 
     def _group_content_added(self, group: dict) -> None:
         """New content inside an already-placed Working card doesn't change
-        _add_timeline_row's row count, so its own was-at-bottom/scroll logic
-        never runs for it -- confirmed live 2026-07-31: once a user expanded
-        a Working card to watch it live, further thinking/tool_call/result
-        growth inside it stopped auto-following, unlike everything else.
-        Only matters while the card is actually expanded; collapsed growth
-        doesn't change the visible height at all."""
-        if not group["toggle"].isChecked():
-            return
-        bar = self.verticalScrollBar()
-        was_at_bottom = bar.value() >= bar.maximum() - self._AT_BOTTOM_TOLERANCE_PX
-        if was_at_bottom:
+        _add_timeline_row's row count, so it needs its own explicit
+        follow-to-bottom call. Only matters while the card is actually
+        expanded; collapsed growth doesn't change the visible height."""
+        if group["toggle"].isChecked():
             self._scroll_to_bottom()
 
     def _group_sub_card(self, border_color: str) -> tuple[QFrame, QVBoxLayout]:
@@ -675,15 +664,11 @@ class LogView(QScrollArea):
         self._pending_thinking_row = {"body": body, "text": text}
 
     def _plain_row_content_grew(self) -> None:
-        """_add_timeline_row's was-at-bottom/scroll logic only runs when a
-        new row is inserted -- growing an existing row's text (streaming
-        reasoning into the same bubble) doesn't change the row count, so it
-        needs the same "only follow if already at the edge" re-check
-        _group_content_added does for the collapsed-card case."""
-        bar = self.verticalScrollBar()
-        was_at_bottom = bar.value() >= bar.maximum() - self._AT_BOTTOM_TOLERANCE_PX
-        if was_at_bottom:
-            self._scroll_to_bottom()
+        """_add_timeline_row's scroll-to-bottom only runs when a new row is
+        inserted -- growing an existing row's text (streaming reasoning
+        into the same bubble) doesn't change the row count, so it needs its
+        own explicit follow-to-bottom call."""
+        self._scroll_to_bottom()
 
     def _group_new_tool_call(self, tool_name: str, time_text: str, *, code: str | None = None) -> None:
         group = self._ensure_activity_group(time_text)

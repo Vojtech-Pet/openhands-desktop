@@ -2434,6 +2434,12 @@ class MainWindow(QMainWindow):
             # nobody sees them without expanding it first.
             reason = event.get("reason", "")
             self._append_log(f"Auto-supervise stopped the agent: {reason}", kind="error")
+            # Confirmed live 2026-08-01: this genuinely needs a human (the
+            # agent gave up, sits paused indefinitely otherwise -- see
+            # _handle_stuck), but nothing here was actually telling anyone
+            # it happened; a conversation could sit stuck for hours with no
+            # visible sign. Same severity as RunState.ERROR, same response.
+            self._notify_needs_attention()
             asyncio.ensure_future(self._handle_stuck(reason))
         elif kind == "progress":
             # Updates the Working card's own visible header (see
