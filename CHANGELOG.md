@@ -2,6 +2,15 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-07-31 — DIFFERENCES.md, single-instance guard, Plan/Code role instructions
+
+- Added `DIFFERENCES.md`/`DIFFERENCES.en.md` documenting what this app adds on top of stock OpenHands.
+- Single-instance guard: launching the app a second time now just raises the already-running window instead of starting a broken second process that fights the first over the fixed-port MCP servers.
+- Reverted "Continue as Code opens a second window" -- caused a real bug (closing the Plan window while a secondary was mid-setup unloaded the model out from under it), and a second window wasn't wanted anyway. Back to reusing the same window.
+- Plan and Code agents each get an explicit note at conversation start about their actual role and available/unavailable tools, so they stop discovering their own limits by trial and error (confirmed live: a Plan agent tried `invoke_skill("ssh")` six times hoping to reach the network before it had no terminal at all).
+- Auto-supervise's stuck recovery waits ~6s to see if the conversation recovers on its own before doing anything (a race with an in-flight nudge made it fire pointlessly before), then redirects the agent to propose its own concrete next steps via `ask_user_question` instead of the app guessing generic options.
+- Agent custom instructions gained sections on not retrying tool/skill calls that only returned static docs, and asking via `ask_user_question` when a decision is genuinely ambiguous.
+
 ## 2026-07-31 — Progress-aware step limit, live reasoning preview
 
 - The 30-step agent limit no longer cuts off genuinely productive runs -- it checks recent progress first and resets instead of stopping if the run is actually going somewhere (a 30-step, all-distinct research stretch with zero repeats was getting cut off just for being long). Only stops on real no-progress. Surfaces a visible "still making progress" notice on reset so a long collapsed stretch doesn't look stalled.
