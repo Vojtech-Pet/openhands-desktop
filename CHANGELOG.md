@@ -2,6 +2,10 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-07-31 — Reset log/Errors count when the active conversation is deleted from Mission Control
+
+- Deleting the currently-shown conversation via Mission Control (instead of the sidebar) left the window displaying a stale log/Errors count for a conversation that no longer existed server-side -- Mission Control now tells the main window when this happens, which resets itself and drops matching local sidebar entries.
+
 ## 2026-07-31 — Fixed status pill getting permanently stuck on "Running…"
 
 - The grace-window fix from earlier today (correct a stale ERROR/Waiting poll reading within 8s of real activity) could leave the status pill stuck showing "Running…" forever for a conversation that had genuinely finished, because the controller's status-poll loop only re-emits `state_changed` on an actual value change and had no way to know the override happened in the view layer. Confirmed live with a screenshot: "Running… 14m 27s" long after the agent's own completion message. Fixed with a generation-guarded scheduled re-check exactly when the grace window elapses.
