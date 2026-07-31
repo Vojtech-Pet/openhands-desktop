@@ -6,16 +6,53 @@ from pathlib import Path
 
 import qasync
 from PySide6.QtGui import QIcon
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication
 
 from openhands_desktop.api.client import AppServerClient
 from openhands_desktop.ui.main_window import MainWindow
+
+# Any string is fine here -- it's just the name of the local (Unix domain)
+# socket used as the single-instance lock, not a network port.
+_SINGLE_INSTANCE_KEY = "openhands-desktop-singleton"
+
+
+def _acquire_single_instance() -> QLocalServer | None:
+    """None if another instance is already running (caller should exit);
+    otherwise a QLocalServer the caller must keep alive for the app's
+    lifetime (letting it get garbage-collected drops the lock).
+
+    QLocalServer/QLocalSocket rather than a hand-rolled PID file: a PID
+    file needs its own crash-recovery logic (is that PID still alive, or
+    -- worse -- reused by an unrelated process since?). A Unix domain
+    socket is released by the OS the moment its owning process dies, dead
+    or alive, so there's no stale-lock case to handle by hand.
+    """
+    probe = QLocalSocket()
+    probe.connectToServer(_SINGLE_INSTANCE_KEY)
+    if probe.waitForConnected(200):
+        probe.disconnectFromServer()
+        return None
+
+    # No live instance answered: any socket file left on disk belongs to a
+    # previous instance that crashed instead of shutting down cleanly.
+    # Clearing it before listening is the standard idiom for this on Unix.
+    QLocalServer.removeServer(_SINGLE_INSTANCE_KEY)
+    server = QLocalServer()
+    server.listen(_SINGLE_INSTANCE_KEY)
+    return server
 
 
 def main() -> int:
     app = QApplication(sys.argv)
     app_icon = _app_icon()
     app.setWindowIcon(app_icon)
+
+    singleton_server = _acquire_single_instance()
+    if singleton_server is None:
+        print("OpenHands Desktop is already running -- not starting a second copy.", file=sys.stderr)
+        return 0
+
     loop = qasync.QEventLoop(app)
     asyncio.set_event_loop(loop)
 
@@ -23,6 +60,21 @@ def main() -> int:
     window = MainWindow(client)
     window.setWindowIcon(app_icon)
     window.show()
+
+    # A second launch attempt connects to the socket above instead of
+    # starting its own instance (see the waitForConnected branch) -- when
+    # that happens, bring this, the real instance's window, to the front
+    # rather than leaving the user wondering why nothing opened.
+    def _on_second_launch_attempt() -> None:
+        connection = singleton_server.nextPendingConnection()
+        if connection is not None:
+            connection.disconnectFromServer()
+        window.show()
+        window.showNormal()
+        window.raise_()
+        window.activateWindow()
+
+    singleton_server.newConnection.connect(_on_second_launch_attempt)
 
     with loop:
         exit_code = loop.run_forever()

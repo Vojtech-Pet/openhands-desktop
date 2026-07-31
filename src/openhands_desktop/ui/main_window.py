@@ -9,6 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import QModelIndex, QSize, QSettings, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon, QKeyEvent, QMouseEvent, QPainter, QTextCursor
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -290,21 +291,11 @@ class ChatInputEdit(QPlainTextEdit):
         super().keyPressEvent(event)
 
 
-# Windows opened via "Continue as Code" (2026-07-31) need a reference kept
-# somewhere for the lifetime of the window -- nothing else in the app holds
-# one, and a QWidget with no Python (or Qt-parent) reference left is fair
-# game for Python's GC despite still being shown on screen.
-_secondary_windows: list["MainWindow"] = []
-
-
 class MainWindow(QMainWindow):
     def __init__(
         self,
         client: AppServerClient,
         history_store: HistoryStore | None = None,
-        *,
-        shared_ask_user_server: AskUserServer | None = None,
-        shared_workspace_server: WorkspaceFolderServer | None = None,
     ) -> None:
         super().__init__()
         self.setWindowTitle("OpenHands Desktop")
@@ -331,6 +322,8 @@ class MainWindow(QMainWindow):
         # after a few tries instead of auto-nudging forever.
         self._auto_nudge_count_for_run = 0
         self._auto_nudge_in_flight = False
+        self._stuck_prompt_shown_for_run = False
+        self._last_run_state: RunState | None = None
         self._tool_call_count = 0
         self._estimated_context_chars = 0
         self._real_used_tokens = 0
@@ -349,19 +342,8 @@ class MainWindow(QMainWindow):
         self._shutdown_started = False
         self._controller: ConversationController | None = None
         self._settings_dialog: SettingsDialog | None = None
-        # A second window ("Continue as Code" opening its own window,
-        # 2026-07-31) can't start its own AskUserServer/WorkspaceFolderServer
-        # -- they're fixed-port (8901/8902) singletons for this whole
-        # process, and a second uvicorn.Server on the same port would just
-        # fail to bind. It reuses the first window's already-running
-        # instances instead; confirmation dialogs for its conversations
-        # then show on the *first* window (whichever one owns the callback
-        # these were constructed with), not perfectly attributed but never
-        # silently dropped either. _owns_mcp_servers gates start/stop and
-        # registration so only the owning window does any of that.
-        self._owns_mcp_servers = shared_ask_user_server is None
-        self._ask_user_server = shared_ask_user_server or AskUserServer(self._on_agent_question)
-        self._workspace_server = shared_workspace_server or WorkspaceFolderServer(
+        self._ask_user_server = AskUserServer(self._on_agent_question)
+        self._workspace_server = WorkspaceFolderServer(
             on_connected=self._on_agent_connected_folder,
             on_confirm_connect=self._confirm_workspace_connect,
             on_confirm_write=self._confirm_workspace_write,
@@ -1748,6 +1730,7 @@ class MainWindow(QMainWindow):
                 kind="system",
             )
         self._auto_nudge_count_for_run = 0
+        self._stuck_prompt_shown_for_run = False
         if self._controller.conversation_id is None:
             self._remember_user_message(text)
             profile_name = self.model_combo.currentData()
@@ -1812,7 +1795,7 @@ class MainWindow(QMainWindow):
             llm_model=model,
             initial_message=text,
             agent_type=agent_type,
-            system_message_suffix=self._custom_instructions(),
+            system_message_suffix=self._custom_instructions(agent_type),
         )
 
     async def _classify_plan_or_code(self, text: str, profile_name: str | None) -> str:
@@ -1825,7 +1808,48 @@ class MainWindow(QMainWindow):
             return "default"
         return "plan" if mode == "plan" else "default"
 
-    def _custom_instructions(self) -> str | None:
+    # Confirmed live 2026-07-31: without this, a Plan-mode agent had to
+    # figure out its own role and limits by trial and error mid-task (tried
+    # invoke_skill("ssh") six times looking for a way to reach the network,
+    # only later reasoning out loud "As a Planning Agent, my main job is to
+    # CREATE THE PLAN... the code agent will execute curl requests"). Stating
+    # this upfront instead of letting it discover it the hard way.
+    _PLAN_MODE_NOTE = (
+        "\n\nYou are running in Plan mode for this conversation. Your job is "
+        "to investigate and produce a plan (a PLAN.md), not to implement "
+        "anything -- a separate Code agent, with full read/write and "
+        "terminal access, will execute your plan afterward.\n"
+        "What you have: glob, grep, reading files, the planning file editor, "
+        "think, finish, and the workspace_connect_folder/list_folder/"
+        "read_file tools for host paths the user mentions.\n"
+        "What you do NOT have: a terminal, the ability to run shell commands "
+        "(curl, git, npm, etc.), or write access to the project's own files. "
+        "If a skill/tool's own description says it runs commands or reaches "
+        "the network, that capability is not actually available to you in "
+        "this mode regardless of what invoking it appears to do -- do not "
+        "hunt for a workaround. Instead, write the concrete step you'd need "
+        "(e.g. \"run curl against X to find the API shape\") into the plan "
+        "for the Code agent to execute."
+    )
+
+    _CODE_MODE_NOTE = (
+        "\n\nYou are running in Code mode for this conversation. Your job is "
+        "to actually implement the change, not just describe it -- read/"
+        "write files, run commands, and verify your work before finishing.\n"
+        "What you have: a terminal (Bash/shell commands, installing "
+        "dependencies, running tests/builds, git), the file editor (create/"
+        "edit/view files), browser tools, a task tracker, think, finish, and "
+        "the workspace_connect_folder/list_folder/read_file/write_file tools "
+        "for host paths the user mentions (write_file needs a separate "
+        "confirmation per call).\n"
+        "If a parent Plan conversation's plan (e.g. .agents_tmp/PLAN.md) is "
+        "part of this conversation's history, treat its discovery steps as "
+        "genuinely unverified -- run them for real (the curl/API-probing "
+        "steps it deferred to you) rather than assuming its assumptions "
+        "were correct."
+    )
+
+    def _custom_instructions(self, agent_type: str | None = None) -> str | None:
         """Custom agent instructions, passed per-conversation.
 
         Settings -> Agent writes these to
@@ -1837,7 +1861,12 @@ class MainWindow(QMainWindow):
         storage here, and the value is delivered through the start request,
         which does work.
         """
-        return self._custom_instructions_text or None
+        text = self._custom_instructions_text or ""
+        if agent_type == "plan":
+            text = text + self._PLAN_MODE_NOTE
+        elif agent_type == "default":
+            text = text + self._CODE_MODE_NOTE
+        return text or None
 
     async def _load_custom_instructions(self) -> None:
         try:
@@ -1893,6 +1922,9 @@ class MainWindow(QMainWindow):
         self.duration_label.setText(text)
 
     def _on_state_changed(self, state: RunState) -> None:
+        self._last_run_state = state
+        if state == RunState.ERROR:
+            self._notify_needs_attention()
         if state in self._TERMINAL_STATES:
             # Freeze instead of continuing to tick through idle time after
             # the agent is actually done -- "how long this ran", not "how
@@ -1947,10 +1979,19 @@ class MainWindow(QMainWindow):
                 self._auto_nudge_count_for_run += 1
                 self.stuck_nudge_btn.setVisible(False)
                 asyncio.ensure_future(self._auto_interrupt_and_nudge())
-            else:
-                # Out of auto-attempts (or one is already in flight) --
-                # leave it to the user.
-                self.stuck_nudge_btn.setVisible(not self._auto_nudge_in_flight)
+            elif not self._auto_nudge_in_flight:
+                # Out of auto-attempts -- leave it to the user, but make
+                # sure they actually notice instead of a button quietly
+                # appearing on a window they might not be looking at.
+                self.stuck_nudge_btn.setVisible(True)
+                if not self._stuck_prompt_shown_for_run:
+                    self._stuck_prompt_shown_for_run = True
+                    asyncio.ensure_future(
+                        self._handle_stuck(
+                            "The agent looks stuck (repeating the same searches/reasoning) "
+                            f"and already used its {_MAX_AUTO_NUDGES_PER_RUN} auto-nudge attempt(s)."
+                        )
+                    )
         else:
             self.stuck_nudge_btn.setVisible(False)
 
@@ -1967,7 +2008,13 @@ class MainWindow(QMainWindow):
                 kind="system",
             )
         elif kind == "stuck":
-            self._append_log(f"[Auto-supervise: stopped -- {event.get('reason')}]", kind="system")
+            # kind="error" here, not "system" -- confirmed live 2026-07-31:
+            # this is exactly the "gave up, needs a human" moment, and
+            # "system" notes fold into the collapsed Working card where
+            # nobody sees them without expanding it first.
+            reason = event.get("reason", "")
+            self._append_log(f"Auto-supervise stopped the agent: {reason}", kind="error")
+            asyncio.ensure_future(self._handle_stuck(reason))
         elif kind == "progress":
             # Updates the Working card's own visible header (see
             # LogView.note_progress) rather than adding a hidden note --
@@ -2001,6 +2048,49 @@ class MainWindow(QMainWindow):
         finally:
             self._auto_nudge_in_flight = False
 
+    def _notify_needs_attention(self) -> None:
+        """Forces the window to the front and flashes the taskbar icon --
+        used whenever the agent stops/errors and genuinely needs the user's
+        attention. Confirmed live 2026-07-31: a collapsed Working card and
+        an unfocused window both hide this otherwise -- nothing short of
+        actually grabbing focus reliably gets noticed."""
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        QApplication.alert(self)
+
+    async def _handle_stuck(self, reason: str) -> None:
+        """Runs after ConversationWatchdog gives up. Confirmed live
+        2026-07-31: asking the user to decide *immediately* sometimes raced
+        an already-in-flight auto-nudge that was about to get the agent
+        moving again on its own, making the question pointless -- so this
+        waits and only actually does anything if the conversation is still
+        not running a few seconds later.
+
+        Doesn't ask the user directly, and doesn't invent generic options
+        itself either -- redirects the agent to propose its own concrete,
+        situation-specific options via the ask_user_question tool it
+        already has (same as how Claude Code's own AskUserQuestion works),
+        since the agent has the actual context on what alternatives make
+        sense here and the app doesn't.
+        """
+        await asyncio.sleep(6.0)
+        if self._controller is None or self._controller.conversation_id is None:
+            return
+        if self._last_run_state == RunState.RUNNING:
+            return  # it recovered on its own -- nothing to do
+        self._controller.interrupt()
+        await asyncio.sleep(1.5)  # see _auto_interrupt_and_nudge's docstring for why this delay matters
+        text = (
+            f"{reason} Do not repeat what you already tried. Call ask_user_question "
+            "with 2-4 concrete, genuinely different options for how to proceed from "
+            "here, specific to this task -- let the user pick the direction instead "
+            "of guessing again."
+        )
+        self._append_log(text, kind="user")
+        self._controller.send_message(text)
+        self._stuck_prompt_shown_for_run = False
+
     def _retry_last_message(self) -> None:
         """Error card's Retry button: resend the last user message, same
         mechanism the auto-nudge uses (ConversationController.send_message)."""
@@ -2025,63 +2115,61 @@ class MainWindow(QMainWindow):
         asyncio.ensure_future(self._continue_as_code_async())
 
     async def _continue_as_code_async(self) -> None:
-        # 2026-07-31: opens in a brand new window instead of reusing/
-        # mutating this one's widgets. Reusing this window's state_label
-        # required an explicit reset-to-"Starting…" (still done for the
-        # window that opens itself, see _start_as_code_continuation) and was
-        # still fragile -- e.g. Mission Control or the sidebar reading this
-        # window's mid-transition state. A second window can't show a stale
-        # value from a conversation it never had; this one just keeps
-        # showing the Plan conversation's real, correct "Finished" state.
+        # 2026-07-31: reverted the brand-new-window approach (it caused a
+        # real bug -- closing the Plan window while a secondary window was
+        # still mid-setup unloaded the model out from under it -- and the
+        # user explicitly didn't want a second app window appearing at
+        # all). Back to reusing this window in place; the state_label reset
+        # to "Starting…" below is what actually fixed the original stale-
+        # "Finished (unverified)" symptom, independent of the window count.
         if self._controller is None or self._controller.conversation_id is None:
             return
         parent_id = self._controller.conversation_id
-        self.continue_as_code_btn.setVisible(False)
         default_code_model = self._settings.value("default_code_model_name")
-        new_window = MainWindow(
-            AppServerClient(self._client.base_url),
-            shared_ask_user_server=self._ask_user_server,
-            shared_workspace_server=self._workspace_server,
-        )
-        new_window.setWindowIcon(self.windowIcon())
-        _secondary_windows.append(new_window)
-        new_window.show()
-        asyncio.ensure_future(new_window._start_as_code_continuation(parent_id, default_code_model))
-
-    async def _start_as_code_continuation(self, parent_id: str, profile_name: str | None) -> None:
-        """Runs on the freshly opened window from _continue_as_code_async,
-        right after construction -- does the same model-load + start_new
-        _continue_as_code_async used to do in place, minus every step that
-        was only there to reset *this* window's widgets away from a stale
-        previous conversation (a brand new window has nothing stale to
-        reset)."""
-        await self._load_custom_instructions()
-        if profile_name:
+        if default_code_model:
             self.model_combo.blockSignals(True)
-            self._switch_to_named_model(profile_name)
+            self._switch_to_named_model(default_code_model)
             self.model_combo.blockSignals(False)
             self._set_model_switching(True)
             try:
-                await self._ensure_profile_ready(profile_name)
+                await self._ensure_profile_ready(default_code_model)
             except Exception as exc:  # noqa: BLE001
                 self._on_error(f"Could not load the Code model: {exc}")
                 return
             finally:
                 self._set_model_switching(False)
         self._current_agent_type = "default"
+        self.continue_as_code_btn.setVisible(False)
+        self._tool_call_count = 0
+        self._estimated_context_chars = 0
+        self._real_used_tokens = 0
+        self._real_context_window = 0
+        self._auto_compact_triggered = False
+        self._update_tool_call_label()
+        # Without this, the status pill keeps showing the parent conversation's
+        # terminal state ("Finished (unverified)") until the new conversation's
+        # own first state_changed event arrives -- which looks exactly like the
+        # new conversation is stuck, even while it's actively running.
+        self.state_label.setText("Starting…")
+        self.state_label.setObjectName("")
+        self.state_label.setToolTip("")
+        _repolish(self.state_label)
+        self._new_controller()
+        self.log.clear()
+        self.stack.setCurrentWidget(self.log)
+        self._append_log(f"[continuing plan from conversation {parent_id} as a Code agent…]")
         self.agent_type_combo.setCurrentIndex(self.agent_type_combo.findData("default"))
         self.agent_type_combo.setEnabled(False)
         model = self._selected_model()
+        self.agent_type_combo.setEnabled(False)
         self._pending_model = model
         self._pending_title = "Continued from plan"
-        self.stack.setCurrentWidget(self.log)
-        self._append_log(f"[continuing plan from conversation {parent_id} as a Code agent…]")
         self._controller.start_new(
             llm_model=model,
             initial_message="Continue implementing the plan from the previous conversation.",
             agent_type="default",
             parent_conversation_id=parent_id,
-            system_message_suffix=self._custom_instructions(),
+            system_message_suffix=self._custom_instructions("default"),
         )
 
     # --- history / sidebar -------------------------------------------------------
@@ -2091,9 +2179,8 @@ class MainWindow(QMainWindow):
         await self._refresh_sidebar_history_async()
         await self._presets.init()
         await self._reload_presets_async()
-        if self._owns_mcp_servers:
-            await self._start_ask_user_server()
-            await self._start_workspace_server()
+        await self._start_ask_user_server()
+        await self._start_workspace_server()
         await self._load_custom_instructions()
 
     async def _start_ask_user_server(self) -> None:
@@ -2566,22 +2653,13 @@ class MainWindow(QMainWindow):
             )
             if self._controller is not None:
                 await self._controller.stop()
-            if self._owns_mcp_servers and not _secondary_windows:
-                # Unregister BEFORE closing the client -- it needs a live
-                # connection, and leaving the entry behind breaks every
-                # future conversation (see _unregister_ask_user_mcp). A
-                # non-owning window must never do this -- it would rip the
-                # tool out from under whichever window actually owns it. If
-                # any secondary window is still open, it's depending on
-                # these same shared instances -- leave them running rather
-                # than break it out from under it; nothing currently stops
-                # them in that case; a real cleanup path can be added if
-                # this order (primary closes first, children stay open)
-                # turns out to be common in practice.
-                await self._unregister_ask_user_mcp()
-                await self._ask_user_server.stop()
-                await self._unregister_workspace_mcp()
-                await self._workspace_server.stop()
+            # Unregister BEFORE closing the client -- it needs a live
+            # connection, and leaving the entry behind breaks every future
+            # conversation (see _unregister_ask_user_mcp).
+            await self._unregister_ask_user_mcp()
+            await self._ask_user_server.stop()
+            await self._unregister_workspace_mcp()
+            await self._workspace_server.stop()
             other_conversations_running = False
             try:
                 conversations = await self._client.search_conversations(limit=50)
@@ -2608,6 +2686,4 @@ class MainWindow(QMainWindow):
                     pass
         finally:
             self._shutdown_complete = True
-            if self in _secondary_windows:
-                _secondary_windows.remove(self)
             self.close()
