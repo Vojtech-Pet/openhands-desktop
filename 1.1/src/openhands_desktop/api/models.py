@@ -1,14 +1,8 @@
-"""Data models for the new (Agent Canvas-era) OpenHands Agent Server API --
-one long-running server instance hosting many conversations directly, no
-app-server orchestrator and no per-conversation sandbox container/session
-key. Field names verified live against openhands-agent-server 1.40.0's own
-OpenAPI schema and real request/response bodies on 2026-08-01 (see
-`agent_server_client.py`), not guessed from documentation.
+"""Data models mirroring the real OpenHands app-server API shapes.
 
-This replaces the old two-tier app-server (port 3000, orchestrates N
-per-conversation sandbox containers) + SandboxConversationClient (talks to
-one conversation's own container) split -- there is now exactly one server
-to talk to for everything.
+Field names and endpoint shapes here were verified live against a running
+agent-server (port 3000) on 2026-07-27, not guessed from documentation --
+see StartTaskStatus / AppConversation for the fields that actually matter.
 """
 
 from __future__ import annotations
@@ -17,12 +11,23 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 
-# Mirrors openhands.sdk.ConversationExecutionStatus exactly (verified live
-# 2026-08-01 against agent-server 1.40.0 -- identical enum to the old
-# app-server's, since both ultimately come from the same SDK). "finished" is
-# deliberately NOT treated as a synonym for "the task is actually done" --
-# see core/completion.py. A model can end its turn with plain text and no
-# finish() tool call, and the server still reports "finished".
+class StartTaskStatus(str, Enum):
+    WORKING = "WORKING"
+    WAITING_FOR_SANDBOX = "WAITING_FOR_SANDBOX"
+    PREPARING_REPOSITORY = "PREPARING_REPOSITORY"
+    RUNNING_SETUP_SCRIPT = "RUNNING_SETUP_SCRIPT"
+    SETTING_UP_GIT_HOOKS = "SETTING_UP_GIT_HOOKS"
+    SETTING_UP_SKILLS = "SETTING_UP_SKILLS"
+    STARTING_CONVERSATION = "STARTING_CONVERSATION"
+    READY = "READY"
+    ERROR = "ERROR"
+
+
+# Mirrors openhands.sdk.ConversationExecutionStatus exactly (verified live,
+# 2026-07-27). "finished" is deliberately NOT treated as a synonym for "the
+# task is actually done" -- see core/completion.py. A model can end its turn
+# with plain text and no finish() tool call, and the server still reports
+# "finished".
 class ExecutionStatus(str, Enum):
     IDLE = "idle"
     RUNNING = "running"
@@ -32,6 +37,27 @@ class ExecutionStatus(str, Enum):
     ERROR = "error"
     STUCK = "stuck"
     DELETING = "deleting"
+
+
+@dataclass
+class AppConversationStartTask:
+    id: str
+    status: StartTaskStatus
+    detail: str | None = None
+    app_conversation_id: str | None = None
+    sandbox_id: str | None = None
+    agent_server_url: str | None = None
+
+    @classmethod
+    def from_json(cls, data: dict) -> "AppConversationStartTask":
+        return cls(
+            id=data["id"],
+            status=StartTaskStatus(data["status"]),
+            detail=data.get("detail"),
+            app_conversation_id=data.get("app_conversation_id"),
+            sandbox_id=data.get("sandbox_id"),
+            agent_server_url=data.get("agent_server_url"),
+        )
 
 
 @dataclass
@@ -45,7 +71,10 @@ class LlmProfile:
     def from_json(cls, data: dict) -> "LlmProfile":
         return cls(
             name=data["name"],
-            model=data["model"],
+            # The current app-server profile summary allows ``model`` to be
+            # null.  Keep the desktop UI usable while such a profile is being
+            # repaired instead of failing while building its label.
+            model=str(data.get("model") or ""),
             base_url=data.get("base_url"),
             api_key_set=data.get("api_key_set", False),
         )
@@ -56,19 +85,25 @@ class AppConversation:
     id: str
     title: str | None
     llm_model: str | None
+    sandbox_status: str
     execution_status: ExecutionStatus | None
+    conversation_url: str | None
+    session_api_key: str | None
+    sandbox_id: str | None
     raw: dict = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_json(cls, data: dict) -> "AppConversation":
         raw_status = data.get("execution_status")
-        agent = data.get("agent") or {}
-        llm = agent.get("llm") or {}
         return cls(
             id=data["id"],
             title=data.get("title"),
-            llm_model=llm.get("model"),
+            llm_model=data.get("llm_model"),
+            sandbox_status=data.get("sandbox_status", "MISSING"),
             execution_status=ExecutionStatus(raw_status) if raw_status else None,
+            conversation_url=data.get("conversation_url"),
+            session_api_key=data.get("session_api_key"),
+            sandbox_id=data.get("sandbox_id"),
             raw=data,
         )
 

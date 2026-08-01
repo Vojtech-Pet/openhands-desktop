@@ -1,10 +1,10 @@
-# OpenHands Desktop (v1.1 -- new Agent Server)
+# OpenHands Desktop (v1.1)
 
 ![OpenHands Desktop screenshot](docs/screenshot.png)
 
-Native PySide6 desktop client for the [OpenHands](https://github.com/OpenHands/OpenHands) Agent Server -- talks directly to `openhands-agent-server`'s REST/WebSocket API (one long-running server hosting every conversation), not the older `app_server` the [1.0](../1.0) version uses.
+Native PySide6 desktop client for the current [OpenHands](https://github.com/OpenHands/OpenHands) app-server. It talks to the local backend on `http://127.0.0.1:3000` (`/api/v1/...`) and then connects to each conversation's sandbox `conversation_url` for live events/control.
 
-**Requires `openhands-agent-server` >= 1.40.0** (and matching `openhands-sdk`/`openhands-tools`). This is the version this client was built and verified live against on 2026-08-01 -- see [MIGRATION_STATUS.md](MIGRATION_STATUS.md) for exactly what's been tested and what's still incomplete. Older agent-server versions may not expose all the endpoints this client calls (`/api/conversations`, `/api/profiles`, `/api/settings`, `/api/skills/installed`, `/api/settings/secrets`, `/api/desktop/url`, `/sockets/events/{id}`).
+The standalone new `openhands-agent-server` flow is intentionally not used yet in this branch.
 
 ## Features
 

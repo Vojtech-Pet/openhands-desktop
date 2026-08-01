@@ -7,8 +7,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, QSize, QSettings, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QKeyEvent, QMouseEvent, QPainter, QTextCursor
+from PySide6.QtCore import QElapsedTimer, QModelIndex, QRectF, QSize, QSettings, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QKeyEvent, QMouseEvent, QPainter, QPen, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -34,8 +34,10 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate,
     QStyleOptionViewItem,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from openhands_desktop.api.client import AppServerClient
@@ -62,8 +64,23 @@ from openhands_desktop.ui.diff_view import ChangesDialog
 from openhands_desktop.ui.icons import icon
 from openhands_desktop.ui.task_board import TaskBoardDialog
 from openhands_desktop.ui.icon_rail import IconRail
-from openhands_desktop.ui.log_view import LogView
-from openhands_desktop.ui.palette import COLOR_NEUTRAL, TEXT_MUTED
+from openhands_desktop.ui.log_view import ConversationLogView
+from openhands_desktop.ui.palette import (
+    BG_BASE,
+    BG_SURFACE_1,
+    BG_SURFACE_2,
+    BG_SURFACE_3,
+    BORDER,
+    BORDER_HOVER,
+    COLOR_DANGER,
+    COLOR_NEUTRAL,
+    COLOR_PRIMARY,
+    COLOR_THINKING_BG,
+    COLOR_THINKING_BORDER,
+    COLOR_WARNING,
+    TEXT_MUTED,
+    TEXT_PRIMARY,
+)
 from openhands_desktop.ui.right_panel import RightPanel, panel_toggle_button
 from openhands_desktop.ui.settings_dialog import SettingsDialog
 from openhands_desktop.ui.sidebar import Sidebar
@@ -87,6 +104,55 @@ def _repolish(widget: QWidget) -> None:
     style = widget.style()
     style.unpolish(widget)
     style.polish(widget)
+
+
+def _split_layout_icon(mode: str) -> QIcon:
+    """Small workspace diagram used by the visual split-position menu."""
+    pixmap = QPixmap(64, 40)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    outer = QRectF(1.5, 1.5, 61, 37)
+    painter.setPen(QPen(QColor(BORDER_HOVER), 1.5))
+    painter.setBrush(QColor(BG_BASE))
+    painter.drawRoundedRect(outer, 4, 4)
+
+    content = QRectF(4, 4, 56, 32)
+    if mode == "combined":
+        painter.setPen(QPen(QColor(BORDER), 1))
+        painter.setBrush(QColor(BG_SURFACE_2))
+        painter.drawRoundedRect(content, 2.5, 2.5)
+        painter.setPen(QPen(QColor(COLOR_PRIMARY), 1.5))
+        painter.drawLine(10, 14, 48, 14)
+        painter.setPen(QPen(QColor(TEXT_MUTED), 1.5))
+        painter.drawLine(10, 21, 54, 21)
+        painter.drawLine(10, 28, 40, 28)
+    else:
+        gap = 2.0
+        if mode in ("left", "right"):
+            activity_width = 18.0
+            if mode == "left":
+                activity = QRectF(content.left(), content.top(), activity_width, content.height())
+                conversation = QRectF(activity.right() + gap, content.top(), content.width() - activity_width - gap, content.height())
+            else:
+                conversation = QRectF(content.left(), content.top(), content.width() - activity_width - gap, content.height())
+                activity = QRectF(conversation.right() + gap, content.top(), activity_width, content.height())
+        else:
+            activity_height = 10.0
+            if mode == "top":
+                activity = QRectF(content.left(), content.top(), content.width(), activity_height)
+                conversation = QRectF(content.left(), activity.bottom() + gap, content.width(), content.height() - activity_height - gap)
+            else:
+                conversation = QRectF(content.left(), content.top(), content.width(), content.height() - activity_height - gap)
+                activity = QRectF(content.left(), conversation.bottom() + gap, content.width(), activity_height)
+        painter.setPen(QPen(QColor(BORDER), 1))
+        painter.setBrush(QColor(BG_SURFACE_2))
+        painter.drawRoundedRect(conversation, 2, 2)
+        painter.setPen(QPen(QColor(COLOR_THINKING_BORDER), 1))
+        painter.setBrush(QColor(COLOR_THINKING_BG))
+        painter.drawRoundedRect(activity, 2, 2)
+    painter.end()
+    return QIcon(pixmap)
 
 
 def _format_action_code(tool_name: str | None, action: dict) -> str:
@@ -225,6 +291,68 @@ class _CurrentSelectionDelegate(QStyledItemDelegate):
             x = option.rect.right() - check.width() - 8
             y = option.rect.center().y() - check.height() // 2
             painter.drawPixmap(x, y, check)
+
+
+class _HoldStopButton(QPushButton):
+    """Short press pauses; a five-second hold performs a hard interrupt."""
+
+    pause_requested = Signal()
+    stop_requested = Signal()
+    HOLD_MS = 5000
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._holding = False
+        self._hard_stop_fired = False
+        self._elapsed = QElapsedTimer()
+        self._hold_timer = QTimer(self)
+        self._hold_timer.setSingleShot(True)
+        self._hold_timer.timeout.connect(self._complete_hold)
+        self._progress_timer = QTimer(self)
+        self._progress_timer.setInterval(40)
+        self._progress_timer.timeout.connect(self.update)
+        self.pressed.connect(self._start_hold)
+        self.released.connect(self._release_hold)
+
+    def _start_hold(self) -> None:
+        self._holding = True
+        self._hard_stop_fired = False
+        self._elapsed.start()
+        self._hold_timer.start(self.HOLD_MS)
+        self._progress_timer.start()
+        self.update()
+
+    def _release_hold(self) -> None:
+        if not self._holding:
+            return
+        should_pause = not self._hard_stop_fired
+        self._holding = False
+        self._hold_timer.stop()
+        self._progress_timer.stop()
+        self.update()
+        if should_pause:
+            self.pause_requested.emit()
+
+    def _complete_hold(self) -> None:
+        if not self._holding or self._hard_stop_fired:
+            return
+        self._hard_stop_fired = True
+        self._progress_timer.stop()
+        self.update()
+        self.stop_requested.emit()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 -- Qt override
+        super().paintEvent(event)
+        if not self._holding:
+            return
+        progress = min(1.0, self._elapsed.elapsed() / self.HOLD_MS)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = COLOR_DANGER if self._hard_stop_fired else COLOR_WARNING
+        painter.setPen(QPen(QColor(color), 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawArc(self.rect().adjusted(2, 2, -2, -2), 90 * 16, int(-360 * 16 * progress))
+        painter.end()
 
 
 class _PresetManagerDialog(QDialog):
@@ -412,6 +540,8 @@ class MainWindow(QMainWindow):
         self._continuing_from_plan_id: str | None = None
         self._conversation_starting = False
         self._model_switching = False
+        self._health_check_in_flight = False
+        self._model_check_in_flight = False
         self._shutdown_complete = False
         self._shutdown_started = False
         self._controller: ConversationController | None = None
@@ -653,6 +783,25 @@ class MainWindow(QMainWindow):
 
         top_bar_layout.addStretch()
 
+        saved_split_position = str(self._settings.value("split_activity_position", "right"))
+        if saved_split_position not in ("left", "right", "top", "bottom"):
+            saved_split_position = "right"
+        split_enabled = self._settings.value("split_activity_view", False, type=bool)
+        self._split_view_mode = saved_split_position if split_enabled else "combined"
+        self.split_view_btn = QToolButton()
+        self.split_view_btn.setObjectName("TopbarMoreButton")
+        self.split_view_btn.setText("Split")
+        self.split_view_btn.setIcon(icon("panel", 16))
+        self.split_view_btn.setCheckable(True)
+        self.split_view_btn.setChecked(split_enabled)
+        self.split_view_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.split_view_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.split_view_btn.setToolTip("Choose where the separate activity panel appears")
+        self.split_view_menu = QMenu(self.split_view_btn)
+        self._populate_split_view_menu(self.split_view_menu)
+        self.split_view_btn.setMenu(self.split_view_menu)
+        top_bar_layout.addWidget(self.split_view_btn)
+
         self.topbar_status_widget = QWidget()
         status_col = QVBoxLayout(self.topbar_status_widget)
         status_col.setContentsMargins(0, 0, 0, 0)
@@ -715,9 +864,12 @@ class MainWindow(QMainWindow):
         self.stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.welcome = WelcomeWidget()
         self.welcome.suggestion_clicked.connect(self._on_suggestion_clicked)
-        self.log = LogView()
+        self.log = ConversationLogView()
         self.log.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.log.retry_requested.connect(self._retry_last_message)
+        if self._split_view_mode != "combined":
+            self.log.set_split_position(self._split_view_mode)
+        self.log.set_split_enabled(self._split_view_mode != "combined")
         self.stack.addWidget(self.welcome)
         self.stack.addWidget(self.log)
         self.stack.setCurrentWidget(self.welcome)
@@ -755,7 +907,7 @@ class MainWindow(QMainWindow):
         input_line.addWidget(self.attach_btn, 0, Qt.AlignmentFlag.AlignTop)
 
         self.input = ChatInputEdit(
-            on_send=self._send, on_stop=self._interrupt, on_focus_change=self._on_composer_focus_change
+            on_send=self._send, on_stop=self._pause_agent, on_focus_change=self._on_composer_focus_change
         )
         self.input.setObjectName("ComposerInput")
         input_line.addWidget(self.input, 1)
@@ -836,12 +988,13 @@ class MainWindow(QMainWindow):
         self.send_btn.clicked.connect(self._send)
         composer_tools_row.addWidget(self.send_btn)
 
-        self.stop_btn = QPushButton()
+        self.stop_btn = _HoldStopButton()
         self.stop_btn.setObjectName("StopButton")
         self.stop_btn.setIcon(icon("stop", 15))
         self.stop_btn.setFixedSize(32, 28)
-        self.stop_btn.setToolTip("Immediately interrupt the agent's in-flight LLM call (Esc)")
-        self.stop_btn.clicked.connect(self._interrupt)
+        self.stop_btn.setToolTip("Click to pause (Esc). Hold for 5 seconds to stop immediately.")
+        self.stop_btn.pause_requested.connect(self._pause_agent)
+        self.stop_btn.stop_requested.connect(self._interrupt)
         composer_tools_row.addWidget(self.stop_btn)
 
         composer_layout.addLayout(composer_tools_row)
@@ -1088,16 +1241,17 @@ class MainWindow(QMainWindow):
         asyncio.ensure_future(self._open_browser_preview_async(self._controller.conversation_id))
 
     async def _open_browser_preview_async(self, conversation_id: str) -> None:
-        # New Agent Server exposes its own /api/desktop/url directly --
-        # no more per-sandbox-container noVNC-port lookup (see
-        # AppServerClient.get_desktop_url).
         try:
-            url = await self._client.get_desktop_url()
+            conversation = await self._client.get_conversation(conversation_id)
+            if not conversation.sandbox_id:
+                self._on_error("No sandbox is attached to this conversation yet.")
+                return
+            url = await self._client.get_novnc_url(conversation.sandbox_id)
         except Exception as exc:  # noqa: BLE001
             self._on_error(f"Could not open browser preview: {exc}")
             return
         if not url:
-            self._on_error("No desktop preview available (server may not have it enabled).")
+            self._on_error("No browser preview available for this sandbox.")
             return
         QDesktopServices.openUrl(QUrl(url))
 
@@ -1246,7 +1400,7 @@ class MainWindow(QMainWindow):
     async def _open_settings_async(self) -> None:
         try:
             settings = await self._client.get_settings()
-            profiles, active_profile = await self._client.list_llm_profiles()
+            profiles, _active_profile = await self._client.list_llm_profiles()
         except Exception as exc:  # noqa: BLE001
             self._on_error(f"Failed to load settings: {exc}")
             return
@@ -1526,6 +1680,9 @@ class MainWindow(QMainWindow):
         keep_action.setEnabled(True)
         keep_action.toggled.connect(self.preserve_thinking_check.setChecked)
 
+        split_menu = menu.addMenu(icon("panel", 16), "Split view")
+        self._populate_split_view_menu(split_menu)
+
         menu.addSeparator()
         history_action = menu.addAction(icon("history", 16), "History")
         history_action.triggered.connect(self._refresh_sidebar_history)
@@ -1550,6 +1707,67 @@ class MainWindow(QMainWindow):
         supervised_action.triggered.connect(self._open_supervised_agent)
 
         menu.exec(self.topbar_menu_btn.mapToGlobal(self.topbar_menu_btn.rect().bottomLeft()))
+
+    def _populate_split_view_menu(self, menu: QMenu) -> None:
+        menu.setObjectName("SplitViewMenu")
+        menu.setStyleSheet(
+            f"QMenu#SplitViewMenu {{ background-color: {BG_SURFACE_1}; border: 1px solid {BORDER}; "
+            "border-radius: 5px; padding: 3px; }}"
+            "QMenu#SplitViewMenu::item { padding: 0px; margin: 0px; }"
+            f"QPushButton#SplitModeOption {{ background-color: {BG_SURFACE_2}; color: {TEXT_PRIMARY}; "
+            f"border: 1px solid {BORDER}; border-radius: 4px; padding: 2px 5px; "
+            "text-align: left; font-size: 11px; font-weight: 600; }}"
+            f"QPushButton#SplitModeOption:hover {{ background-color: {BG_SURFACE_3}; "
+            f"border-color: {BORDER_HOVER}; }}"
+            f"QPushButton#SplitModeOption:checked {{ background-color: {BG_SURFACE_3}; "
+            f"border: 1px solid {COLOR_PRIMARY}; color: {TEXT_PRIMARY}; }}"
+        )
+        labels = {
+            "combined": "Combined",
+            "left": "Activity on left",
+            "right": "Activity on right",
+            "top": "Activity on top",
+            "bottom": "Activity on bottom",
+        }
+        for mode, label in labels.items():
+            action = QWidgetAction(menu)
+            action.setData(mode)
+            option = QPushButton(label)
+            option.setObjectName("SplitModeOption")
+            option.setIcon(_split_layout_icon(mode))
+            option.setIconSize(QSize(38, 24))
+            option.setCheckable(True)
+            option.setChecked(mode == self._split_view_mode)
+            option.setMinimumSize(174, 34)
+            option.clicked.connect(
+                lambda _checked=False, selected=mode, popup=menu: self._choose_split_view_mode(
+                    selected, popup
+                )
+            )
+            action.setDefaultWidget(option)
+            menu.addAction(action)
+
+    def _choose_split_view_mode(self, mode: str, menu: QMenu) -> None:
+        self._set_split_view_mode(mode)
+        menu.close()
+
+    def _set_split_view_mode(self, mode: str) -> None:
+        if mode not in ("combined", "left", "right", "top", "bottom"):
+            return
+        self._split_view_mode = mode
+        enabled = mode != "combined"
+        self.split_view_btn.setChecked(enabled)
+        self._settings.setValue("split_activity_view", enabled)
+        if enabled:
+            self._settings.setValue("split_activity_position", mode)
+        if hasattr(self, "log"):
+            if enabled:
+                self.log.set_split_position(mode)
+            self.log.set_split_enabled(enabled)
+        for action in self.split_view_menu.actions():
+            option = action.defaultWidget() if isinstance(action, QWidgetAction) else None
+            if isinstance(option, QPushButton):
+                option.setChecked(action.data() == mode)
 
     def _open_new_window(self) -> None:
         # Shares this process's AppServerClient and the two MCP servers
@@ -1612,31 +1830,26 @@ class MainWindow(QMainWindow):
 
     async def _load_profiles_async(self) -> None:
         try:
-            profiles, _active_profile = await self._client.list_llm_profiles()
+            profiles, active_profile = await self._client.list_llm_profiles()
         except Exception as exc:  # noqa: BLE001
             self._on_error(f"Failed to load LLM profiles: {exc}")
             return
         self._profiles_by_name = {p.name: p for p in profiles}
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
-        # Starts on this placeholder, not the remembered/server-active
-        # profile -- 2026-07-31: the launcher script used to force-load the
-        # Plan model on every single launch regardless of what the user was
-        # about to pick, which this combo defaulting to "already selected"
-        # matched visually even after that eager load was removed (nothing
-        # is actually loaded yet, but the chip claimed a specific profile
-        # was current). _check_loaded_model_async right below corrects this
-        # to the real profile if something genuinely is already loaded;
-        # otherwise it's a real "nothing chosen yet" until the user picks
-        # Plan/Code or a model, which is what actually triggers a load.
         self.model_combo.addItem("No model", userData=None)
         for p in profiles:
-            self.model_combo.addItem(icon("model-ai"), f"{p.name} ({p.model})", userData=p.name)
+            label = f"{p.name} ({p.model})" if p.model else p.name
+            self.model_combo.addItem(icon("model-ai"), label, userData=p.name)
+
+        # Start deliberately without selecting or loading a model.  Profiles
+        # stay available in the menu and are activated only after the user
+        # chooses one.
         self.model_combo.setCurrentIndex(0)
         self.model_combo.blockSignals(False)
         self._update_model_status_label()
         self._refresh_thinking_toggles()
-        self._check_loaded_model(auto_select=True)
+        self._check_loaded_model(auto_select=False)
 
     def _on_model_selection_changed(self, _index: int) -> None:
         name = self.model_combo.currentData()
@@ -1774,12 +1987,27 @@ class MainWindow(QMainWindow):
         _repolish(self.model_status_label)
 
     def _check_loaded_model(self, *, auto_select: bool = False) -> None:
+        if self._model_check_in_flight:
+            return
         asyncio.ensure_future(self._check_loaded_model_async(auto_select=auto_select))
 
     async def _check_loaded_model_async(self, *, auto_select: bool = False) -> None:
-        if not self._profiles_by_name:
+        if self._model_check_in_flight:
             return
-        detected = await detect_loaded_model()
+        self._model_check_in_flight = True
+        detected = None
+        try:
+            if not self._profiles_by_name:
+                return
+            detected = await detect_loaded_model()
+        except Exception as exc:  # noqa: BLE001
+            self._on_error(f"Model check failed: {exc}")
+            return
+        finally:
+            self._model_check_in_flight = False
+        await self._handle_detected_model(detected, auto_select=auto_select)
+
+    async def _handle_detected_model(self, detected, *, auto_select: bool = False) -> None:
         if detected is None:
             # Distinguish "LM Studio is up but nothing's loaded" from
             # "unreachable" -- the health chip only checks the OpenHands
@@ -1925,10 +2153,23 @@ class MainWindow(QMainWindow):
     # --- health / workspace ----------------------------------------------------
 
     def _check_health(self) -> None:
+        if self._health_check_in_flight:
+            return
         asyncio.ensure_future(self._check_health_async())
 
     async def _check_health_async(self) -> None:
-        ok = await self._client.health()
+        if self._health_check_in_flight:
+            return
+        self._health_check_in_flight = True
+        ok = False
+        llm_state = "unreachable"
+        try:
+            ok = await self._client.health()
+            llm_state = await probe_llm_server_state() if ok else "unreachable"
+        except Exception as exc:  # noqa: BLE001
+            self._on_error(f"Health check failed: {exc}")
+        finally:
+            self._health_check_in_flight = False
         self._health_full_text = f"Health: {'OK' if ok else 'unreachable'}"
         self.health_label.setText(self._health_full_text)
         self.health_label.setObjectName("HealthOk" if ok else "HealthBad")
@@ -1945,7 +2186,7 @@ class MainWindow(QMainWindow):
         # instance of the same confusion) -- it just wasn't wired in here
         # yet. Skipped when app_server itself is down since LM Studio state
         # is irrelevant at that point.
-        self._llm_server_state = await probe_llm_server_state() if ok else "unreachable"
+        self._llm_server_state = llm_state
         fully_connected = ok and self._llm_server_state == "loaded"
 
         self.overall_status_icon_label.setPixmap(
@@ -2056,22 +2297,37 @@ class MainWindow(QMainWindow):
         self._append_log(text, kind="user")
         host_path = _find_host_path_reference(text)
         if host_path and not self._workspace_server.connected:
-            # Verified live 2026-07-30: a message referencing a host path
-            # (e.g. "/home/user/project") sent the agent looking for it
-            # inside its own sandbox, where it doesn't exist -- the
-            # app-server API has no per-conversation way to mount an
-            # arbitrary host directory (see client.py's DEFAULT_WORKSPACE_PATH
-            # note), so this can never actually resolve. Left the agent to
-            # guess (it cloned the wrong GitHub repo trying to "find" it),
-            # which then blew away its own sandbox root. Suppressed once a
-            # folder is actually connected via the Workspace chip/icon
-            # (workspace_server.py) -- that's the real fix; this note is
-            # just insurance against repeating the mistake blind.
+            try:
+                host_candidate = Path(host_path).expanduser().resolve(strict=True)
+            except OSError:
+                host_candidate = None
+            if host_candidate is not None and host_candidate.is_dir():
+                self._workspace_server.set_root(str(host_candidate))
+                asyncio.ensure_future(self._register_workspace_mcp())
+                self._workspace_full_text = f"{host_candidate.name} (connected)"
+                self.workspace_value_label.setText(self._workspace_full_text)
+                self.workspace_status_label.setText(f"Workspace: {host_candidate.name}")
+                self._sync_right_panel()
+                self._append_log(
+                    f"Connected host folder {host_candidate} for this desktop session. "
+                    "The agent should use workspace_list_folder/workspace_read_file "
+                    "instead of opening that /home path directly in its sandbox.",
+                    kind="system",
+                )
+            else:
+                self._append_log(
+                    f"Heads up: \"{host_path}\" looks like a path on your computer. "
+                    "The agent's sandbox (/workspace/project) can't see it directly -- "
+                    "connect a folder via the Workspace button/icon first so the agent "
+                    "can actually read it (workspace_connect_folder, "
+                    "workspace_list_folder, workspace_read_file tools).",
+                    kind="system",
+                )
+        elif host_path and self._workspace_server.connected:
             self._append_log(
-                f"Heads up: \"{host_path}\" looks like a path on your computer. "
-                "The agent's sandbox (/workspace/project) can't see it directly -- "
-                "connect a folder via the Workspace button/icon first so the agent "
-                "can actually read it (list_folder/read_file tools).",
+                "Host workspace bridge is already connected. The agent should use "
+                "workspace_list_folder/workspace_read_file for host files, not direct "
+                "/home paths inside the sandbox.",
                 kind="system",
             )
         self._auto_nudge_count_for_run = 0
@@ -2089,7 +2345,7 @@ class MainWindow(QMainWindow):
             # _start_new_after_model_ready by classify_plan_or_code. Only
             # applies when the combo is still at its Code default; an
             # explicit manual Plan pick always wins over auto-decide.
-            manual_agent_type = self.agent_type_combo.currentData()  # noqa: F841 -- kept for downstream Plan/Code UI state, not passed to the new client yet (see MIGRATION_STATUS.md)
+            manual_agent_type = self.agent_type_combo.currentData()
             agent_type = (
                 None
                 if self._auto_decide_plan_code and manual_agent_type != "plan"
@@ -2195,21 +2451,11 @@ class MainWindow(QMainWindow):
             )
         self.agent_type_combo.setEnabled(False)
         profile = self._profiles_by_name.get(profile_name) if profile_name else None
-        # The new Agent Server has no server-side profile store the desktop
-        # can reference by name -- the api_key value itself must be sent
-        # inline now, and this client never learns the real one (the old
-        # app-server never gave it back either, only api_key_set). Local
-        # LLM servers (LM Studio/Ollama/etc) don't validate this at all, so
-        # a placeholder is fine for them; a real remote provider profile
-        # will need actual key storage wired up separately (see
-        # MIGRATION_STATUS.md -- not done yet).
         controller.start_new(
             llm_model=model,
-            llm_base_url=profile.base_url if profile else None,
-            llm_api_key="not-needed",
             initial_message=text,
+            agent_type=agent_type or "default",
             system_message_suffix=self._custom_instructions(agent_type),
-            mcp_config=self._current_mcp_config(),
         )
 
     async def _classify_plan_or_code(self, text: str, profile_name: str | None) -> str:
@@ -2282,14 +2528,15 @@ class MainWindow(QMainWindow):
         "script to create and what behavior it must have.\n\n"
         "You do NOT have launch_subagent/sub-agent delegation in this mode "
         "(confirmed live -- it is not in your tool list) -- do not search "
-        "for it or try to work around its absence. If the task involves "
-        "a private local project that has its own dedicated subagent named "
-        "\"project-module-engineer\" (check your available agent types), "
-        "write into PLAN.md that the Code agent must delegate this work to "
-        "it via launch_subagent -- that is Code's job to do, not yours. "
+        "for it or try to work around its absence. If the task involves a "
+        "private local project, write into PLAN.md that Code should use a "
+        "matching project subagent only if its exact name appears in the "
+        "available agent types. "
         "\"project-module-engineer\" is only a subagent_type value for a "
-        "future launch_subagent call, NOT a directory, file, or project "
-        "name -- do not search the filesystem for anything by that name."
+        "future launch_subagent call when registered, NOT a directory, file, "
+        "or project name -- do not search the filesystem for it. If it is "
+        "not registered, the plan must allow Code to use an available coder/"
+        "general-purpose agent or implement the work directly."
     )
 
     _CODE_MODE_NOTE = (
@@ -2306,20 +2553,15 @@ class MainWindow(QMainWindow):
         "Before calling finish: confirm the actual change exists on disk "
         "(read the file back, or run the test/build) -- do not call finish "
         "based on believing a previous step succeeded without checking.\n\n"
-        "Mandatory delegation for a private local project: if a dedicated "
-        "\"project-module-engineer\" subagent is configured (check your "
-        "available agent types), your FIRST action for any task that "
-        "falls within its own description must be an actual tool call to "
-        "launch_subagent with subagent_type=\"project-module-engineer\" -- "
-        "not a terminal command, not a file read, an actual "
-        "launch_subagent call. Do not investigate or implement that work "
-        "yourself first, and do not search the filesystem for a "
-        "directory/file/project named \"project-module-engineer\" -- that "
-        "string is only a subagent_type value, it does not name any real "
-        "path on disk anywhere. It has a full domain-specific playbook "
-        "that doing the work directly instead of delegating would skip. "
-        "This overrides the general \"use subagents only when the task "
-        "genuinely benefits\" guidance for this specific category of task."
+        "Subagent delegation for a private local project: inspect the agent "
+        "types exposed by the task/launch_subagent tool before delegating. "
+        "Call subagent_type=\"project-module-engineer\" only when that exact "
+        "type is listed as available. Never submit an invented or unavailable "
+        "subagent type. If the specialist is absent, use a listed coder or "
+        "general-purpose type when appropriate, otherwise implement the work "
+        "directly with your own Code tools. Do not search the filesystem for "
+        "a path named \"project-module-engineer\"; it is only an optional "
+        "registered agent type."
     )
 
     # Only appended when this Code conversation was actually started via
@@ -2368,6 +2610,17 @@ class MainWindow(QMainWindow):
         "not for ordinary setup/implementation friction."
     )
 
+    _AGENT_PROGRESS_NOTE = (
+        "\n\nProgress updates: While working, send short agent-style progress "
+        "messages before meaningful phases and after important findings. Keep "
+        "them concrete: what you are checking, what you found, what you will "
+        "change or verify next. Do not narrate obvious internal thoughts, do "
+        "not apologize repeatedly, and do not wait silently through long tool "
+        "work. For longer tasks, update roughly every 20-40 seconds or when "
+        "the work phase changes. These updates should sound like a working "
+        "coding agent, not a casual chatbot."
+    )
+
     def _custom_instructions(self, agent_type: str | None = None, *, continued_from_plan: bool = False) -> str | None:
         """Custom agent instructions, passed per-conversation.
 
@@ -2380,7 +2633,7 @@ class MainWindow(QMainWindow):
         storage here, and the value is delivered through the start request,
         which does work.
         """
-        text = self._custom_instructions_text or ""
+        text = (self._custom_instructions_text or "") + self._AGENT_PROGRESS_NOTE
         if agent_type == "plan":
             text = text + self._PLAN_MODE_NOTE
         elif agent_type == "default":
@@ -2406,10 +2659,16 @@ class MainWindow(QMainWindow):
         self._recent_user_messages.append(normalized)
         self._recent_user_messages = self._recent_user_messages[-5:]
 
+    def _pause_agent(self) -> None:
+        if self._controller is not None:
+            self._controller.pause()
+            self._append_log("Pause requested. The current model response may finish first.", kind="system")
+
     def _interrupt(self) -> None:
         if self._controller is not None:
             self._controller.interrupt()
             self._user_interrupted_awaiting_priority = True
+            self._append_log("Agent interrupted after holding Stop for 5 seconds.", kind="system")
 
     def _on_conversation_ready(self, conversation_id: str) -> None:
         self.changes_btn.setEnabled(True)
@@ -2725,7 +2984,14 @@ class MainWindow(QMainWindow):
         if self._controller is None or self._controller.conversation_id is None:
             return
         lowered = error_text.lower()
-        if "not a valid directory" not in lowered and "no such file or directory" not in lowered:
+        path_error = (
+            "not a valid directory" in lowered
+            or "no such file or directory" in lowered
+            or "invalid `path` parameter" in lowered
+            or "invalid path parameter" in lowered
+            or "please provide a valid path" in lowered
+        )
+        if not path_error:
             return
         if not any(prefix in error_text for prefix in self._HOST_PATH_PREFIXES):
             return
@@ -2967,22 +3233,14 @@ class MainWindow(QMainWindow):
         self.agent_type_combo.setEnabled(False)
         self._pending_model = model
         self._pending_title = "Continued from plan"
-        # parent_conversation_id / cross-container continuation isn't
-        # supported the same way against the new Agent Server (no more
-        # per-conversation sandbox to hand off from) -- this starts a
-        # genuinely NEW conversation with the same instructions instead of
-        # a real server-side continuation. See MIGRATION_STATUS.md; the new
-        # server's /fork endpoint may be the right primitive for a proper
-        # fix, not yet wired up.
         profile_name = self.model_combo.currentData()
         profile = self._profiles_by_name.get(profile_name) if profile_name else None
         self._controller.start_new(
             llm_model=model,
-            llm_base_url=profile.base_url if profile else None,
-            llm_api_key="not-needed",
             initial_message=self._continue_as_code_initial_message(),
+            agent_type="default",
+            parent_conversation_id=self._continuing_from_plan_id,
             system_message_suffix=self._custom_instructions("default", continued_from_plan=True),
-            mcp_config=self._current_mcp_config(),
         )
 
     def _continue_as_code_initial_message(self) -> str:
@@ -3042,13 +3300,9 @@ class MainWindow(QMainWindow):
 
     def _current_mcp_config(self) -> dict:
         """Built directly from this app's own already-running local MCP
-        servers, not fetched from /api/settings -- unlike the old app-
-        server, a new conversation here does NOT inherit the global
-        mcp_config automatically (confirmed live 2026-08-01: a real
-        conversation came back with agent.mcp_config == {} despite both
-        servers being correctly registered in global settings), so every
-        start_new() call must pass this explicitly. Same url/transport/
-        timeout shapes as _register_ask_user_mcp/_register_workspace_mcp.
+        servers. The current app-server path registers this globally via
+        /api/v1/settings before conversations start; this helper keeps the
+        desired shape in one place for registration/debug use.
         """
         config: dict = {}
         if self._ask_user_server is not None:

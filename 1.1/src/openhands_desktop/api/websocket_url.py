@@ -1,15 +1,7 @@
-"""Live event stream path for the new (Agent Canvas-era) Agent Server:
-one shared server for every conversation, at `/sockets/events/{id}` off
-its own base URL, authenticated with the single global session API key as
-a query param (verified live 2026-08-01 against agent-server 1.40.0's own
-sockets.py -- `_resolve_websocket_session_api_key` accepts it either as
-the `x-session-api-key` header or the `session_api_key` query param; a
-browser's native WebSocket API cannot set custom headers, so the query
-param is the only option a plain client can rely on).
-
-Unlike the old per-conversation sandbox-container model, there is no
-per-conversation `conversation_url` to parse -- every conversation lives
-on the same server, at the same host:port.
+"""Mirrors frontend/src/utils/websocket-url.ts: the live event stream is NOT
+served by the main app-server API -- the client connects directly to the
+conversation's own sandbox agent-server, at a path derived from
+`conversation_url`, authenticated with `session_api_key` as a query param.
 """
 
 from __future__ import annotations
@@ -17,10 +9,23 @@ from __future__ import annotations
 from urllib.parse import urlparse
 
 
-def build_websocket_url(conversation_id: str, base_url: str, session_api_key: str | None) -> str:
-    parsed = urlparse(base_url)
-    scheme = "wss" if parsed.scheme == "https" else "ws"
-    url = f"{scheme}://{parsed.netloc}/sockets/events/{conversation_id}"
+def build_websocket_url(conversation_id: str, conversation_url: str | None, session_api_key: str | None) -> str:
+    if conversation_url:
+        parsed = urlparse(conversation_url)
+        host = parsed.netloc
+        # Path prefix is everything before /api/conversations (proxy deployments
+        # expose the sandbox under e.g. /runtime/{port}/api/conversations/...).
+        prefix = ""
+        marker = "/api/conversations"
+        if marker in parsed.path:
+            prefix = parsed.path.split(marker)[0].rstrip("/")
+        scheme = "wss" if parsed.scheme == "https" else "ws"
+    else:
+        host = "127.0.0.1:3000"
+        prefix = ""
+        scheme = "ws"
+
+    url = f"{scheme}://{host}{prefix}/sockets/events/{conversation_id}"
     if session_api_key:
         url += f"?session_api_key={session_api_key}"
     return url

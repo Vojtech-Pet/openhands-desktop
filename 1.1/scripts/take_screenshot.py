@@ -8,8 +8,6 @@ import sys
 
 sys.path.insert(0, "src")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ["AGENT_SERVER_URL"] = "http://127.0.0.1:8010"
-os.environ["AGENT_SERVER_SESSION_API_KEY"] = "dev-key-123"
 
 import qasync  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
@@ -20,7 +18,7 @@ from openhands_desktop.ui.main_window import MainWindow  # noqa: E402
 
 
 async def main() -> None:
-    client = AppServerClient(base_url="http://127.0.0.1:8010", session_api_key="dev-key-123")
+    client = AppServerClient(base_url="http://127.0.0.1:3000")
     history = HistoryStore(db_path="/tmp/screenshot-history.db")
     window = MainWindow(client, history_store=history)
     window.resize(1930, 965)

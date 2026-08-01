@@ -319,9 +319,8 @@ async def supervise_openhands_task(
     try:
         controller.start_new(
             llm_model=llm_model,
-            llm_base_url=llm_base_url,
-            llm_api_key=llm_api_key,
             initial_message=task,
+            agent_type="default",
         )
         result = await done
     finally:

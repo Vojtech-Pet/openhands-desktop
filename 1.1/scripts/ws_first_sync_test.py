@@ -66,6 +66,7 @@ async def main() -> None:
         execution_status=None,
         conversation_url=None,  # no real websocket connection attempted
         session_api_key=None,
+        sandbox_id=None,
         raw={},
     )
 

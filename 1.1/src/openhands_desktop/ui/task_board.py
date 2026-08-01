@@ -3,14 +3,8 @@ parallel-session view): every conversation on the server with its live
 execution_status in one list, not just the sidebar's local HistoryStore-
 backed chronological view -- so several running tasks read at a glance,
 and one that isn't in local history (e.g. started from another client) is
-still reachable. Backed by the real GET /api/conversations/search endpoint
-on the new Agent Server.
-
-Unlike the old app-server-era version, there is no more orphaned-container
-detection/stop-via-docker here: a conversation on the new Agent Server is
-just server-side state, not a separate per-conversation Docker container
-that can desync from the server's own bookkeeping -- that whole failure
-mode (see openhands-desktop v1.0's task_board.py) doesn't exist anymore.
+still reachable. Backed by the real GET /api/v1/app-conversations/search
+endpoint on the current OpenHands app-server.
 """
 
 from __future__ import annotations

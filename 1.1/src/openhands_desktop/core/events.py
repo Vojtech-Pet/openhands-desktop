@@ -80,9 +80,19 @@ def _extract_text(raw: dict) -> str | None:
 
     observation = raw.get("observation")
     if observation and isinstance(observation.get("content"), list):
-        parts = [c.get("text") for c in observation["content"] if c.get("type") == "text"]
+        parts = [
+            c.get("text")
+            for c in observation["content"]
+            if isinstance(c, dict) and c.get("text")
+        ]
         if parts:
             return "".join(p for p in parts if p)
+
+    if observation:
+        for key in ("error", "message", "detail"):
+            value = observation.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
 
     if "text" in raw:
         return raw.get("text")

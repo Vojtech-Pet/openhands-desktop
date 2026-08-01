@@ -1,6 +1,6 @@
 """Live verification of the settings/profiles/skills/secrets client methods
-added for settings_dialog.py, against the real dev agent-server. Not part
-of the shipped app.
+against the current OpenHands app-server on port 3000. Not part of the
+shipped app.
 """
 
 import asyncio
@@ -12,7 +12,7 @@ from openhands_desktop.api.client import AppServerClient  # noqa: E402
 
 
 async def main() -> None:
-    client = AppServerClient(base_url="http://127.0.0.1:8010", session_api_key="dev-key-123")
+    client = AppServerClient(base_url="http://127.0.0.1:3000")
     try:
         profiles, active = await client.list_llm_profiles()
         print(f"profiles: {profiles}, active={active}")
@@ -26,7 +26,7 @@ async def main() -> None:
         print("save_profile: OK")
 
         detail = await client.get_profile_detail("test-lmstudio")
-        print(f"get_profile_detail: name={detail.get('name')}, model={detail.get('config', {}).get('model')}")
+        print(f"get_profile_detail: name={detail.get('name')}, model={detail.get('model')}")
 
         await client.activate_profile("test-lmstudio")
         print("activate_profile: OK")
@@ -36,6 +36,9 @@ async def main() -> None:
 
         await client.delete_profile("test-lmstudio")
         print("delete_profile: OK")
+        if active:
+            await client.activate_profile(active)
+            print(f"restore active profile: {active}")
 
         settings = await client.get_settings()
         print(f"get_settings: keys={list(settings.keys())}")

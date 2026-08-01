@@ -1,4 +1,4 @@
-"""Verifies ConversationController against the real dev agent-server,
+"""Verifies ConversationController against the current OpenHands app-server,
 including the WebSocket live-event path (test_new_client.py only covered
 REST). Still no Qt GUI -- QObject/Signal work fine headless as long as
 there's a Qt event loop driving them, which qasync provides here exactly
@@ -18,7 +18,7 @@ from openhands_desktop.core.conversation_controller import ConversationControlle
 
 
 async def main() -> None:
-    client = AppServerClient(base_url="http://127.0.0.1:8010", session_api_key="dev-key-123")
+    client = AppServerClient(base_url="http://127.0.0.1:3000")
     controller = ConversationController(client)
 
     done = asyncio.Event()
@@ -47,9 +47,8 @@ async def main() -> None:
 
     controller.start_new(
         llm_model="openai/qwen3.6-35b-a3b-iq4_nl",
-        llm_base_url="http://172.17.0.1:1234/v1",
-        llm_api_key="lm-studio",
         initial_message="Say hello in exactly one short sentence, then call finish.",
+        agent_type="default",
     )
 
     try:

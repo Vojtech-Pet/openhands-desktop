@@ -1,6 +1,6 @@
 """Settings dialog. Left nav with the 9 sections from the real OpenHands
 settings menu (per the provided menu-theme SVG kit's manifest.json
-`menu_order`). Every section is wired to the real OpenHands agent-server API
+`menu_order`). Every section is wired to the real OpenHands app-server API
 (confirmed live against a running server on 2026-07-28 -- see client.py for
 the endpoints), not a mockup:
 
@@ -432,8 +432,11 @@ class _ProfileRowWidget(QWidget):
         self._name_label = QLabel()
         self._name_label.setStyleSheet(f"color: {TEXT_PRIMARY}; font-weight: 600;")
         text_col.addWidget(self._name_label)
-        detail = profile.model + (f" · {profile.base_url}" if profile.base_url else "")
+        detail = profile.model
+        if profile.base_url:
+            detail = f"{detail} · {profile.base_url}" if detail else profile.base_url
         detail_label = QLabel(detail)
+        detail_label.setVisible(bool(detail))
         detail_label.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 12px;")
         text_col.addWidget(detail_label)
         self._row_layout.addLayout(text_col, 1)
@@ -1160,12 +1163,6 @@ class _SkillsPage(QWidget):
 
 
 class _IntegrationsPage(QWidget):
-    """Git-provider OAuth token storage has no equivalent on the new Agent
-    Server (checked its full OpenAPI schema -- not present under any path,
-    unlike profiles/settings/skills/secrets which all have close
-    successors). Disabled rather than wired to client methods that don't
-    exist -- see MIGRATION_STATUS.md."""
-
     def __init__(self, client: AppServerClient, provider_tokens_set: dict) -> None:
         super().__init__()
         self._client = client
@@ -1173,17 +1170,77 @@ class _IntegrationsPage(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         page, layout = _page("Integrations", "integrations", "Connect git provider accounts.")
         outer.addWidget(page)
+        form = _form(layout)
+
+        self._status_labels: dict[str, QLabel] = {}
+        for provider in ["github", "gitlab", "bitbucket"]:
+            row = QHBoxLayout()
+            token_field = QLineEdit()
+            token_field.setPlaceholderText("Personal access token")
+            token_field.setEchoMode(QLineEdit.EchoMode.Password)
+            row.addWidget(token_field, 1)
+            connect_btn = QPushButton("Connect")
+            connect_btn.clicked.connect(lambda _c=False, p=provider, f=token_field: self._on_connect(p, f))
+            row.addWidget(connect_btn)
+            status = QLabel("Connected" if provider_tokens_set.get(provider) else "Not connected")
+            status.setStyleSheet(
+                f"color: {COLOR_SUCCESS if provider_tokens_set.get(provider) else TEXT_MUTED}; font-size: 12px;"
+            )
+            self._status_labels[provider] = status
+            row.addWidget(status)
+            form.addRow(provider.capitalize(), row)
+
+        disconnect_btn = QPushButton("Disconnect all providers")
+        disconnect_btn.clicked.connect(self._on_disconnect_all)
+        layout.addWidget(disconnect_btn, 0, Qt.AlignmentFlag.AlignLeft)
 
         note = QLabel(
-            "Not available yet on this server: the new Agent Server (v1.1's "
-            "backend, see MIGRATION_STATUS.md) has no git-provider token "
-            "storage endpoint at all -- this section is disabled until "
-            "that lands upstream or a local equivalent is added."
+            "The server validates each token against the provider's API before storing it. "
+            "There's no per-provider disconnect -- only all at once."
         )
         note.setWordWrap(True)
         note.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px;")
         layout.addWidget(note)
         layout.addStretch(1)
+
+    def _on_connect(self, provider: str, field: QLineEdit) -> None:
+        token = field.text().strip()
+        if not token:
+            QMessageBox.warning(self, "Missing token", "Enter a token first.")
+            return
+        _run_async(
+            self,
+            self._client.store_git_provider_token(provider, token),
+            lambda _: self._on_connected(provider, field),
+            error_title=f"Failed to connect {provider}",
+        )
+
+    def _on_connected(self, provider: str, field: QLineEdit) -> None:
+        field.clear()
+        self._status_labels[provider].setText("Connected")
+        self._status_labels[provider].setStyleSheet(f"color: {COLOR_SUCCESS}; font-size: 12px;")
+
+    def _on_disconnect_all(self) -> None:
+        reply = QMessageBox.question(
+            self,
+            "Disconnect all providers",
+            "Disconnect ALL git providers? This can't be undone per-provider.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        _run_async(
+            self,
+            self._client.unset_git_provider_tokens(),
+            lambda _: self._on_all_disconnected(),
+            error_title="Failed to disconnect providers",
+        )
+
+    def _on_all_disconnected(self) -> None:
+        for status in self._status_labels.values():
+            status.setText("Not connected")
+            status.setStyleSheet(f"color: {TEXT_MUTED}; font-size: 12px;")
 
 
 # --------------------------------------------------------------------------
@@ -1369,14 +1426,10 @@ class _SecretsPage(QWidget):
             )
 
     def _on_edit_clicked(self, secret: dict) -> None:
-        # The new server's secrets endpoint is PUT-to-create-or-update by
-        # name with a REQUIRED value field (verified live) -- there's no
-        # metadata-only update route like the old app-server's
-        # PUT /api/v1/secrets/{secret_id} had. The dialog's own value field
-        # is already disabled in edit mode with a "delete and re-add
-        # instead" placeholder; this now actually follows through on that
-        # instead of calling an update that would either fail (empty
-        # required field) or silently blank out the real secret value.
+        # The backend never returns secret values after creation. Editing in
+        # place would either require asking for the secret again or risk
+        # blanking it out, so this flow keeps the explicit delete/re-add
+        # behavior.
         QMessageBox.information(
             self,
             "Can't edit in place",

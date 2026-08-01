@@ -24,6 +24,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSplitter,
+    QStackedWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -206,7 +208,7 @@ class LogView(QScrollArea):
         self._scroll_to_bottom_btn.clicked.connect(self._scroll_to_bottom_now)
         self._scroll_to_bottom_btn.hide()
         self.verticalScrollBar().valueChanged.connect(self._update_scroll_to_bottom_btn)
-        self.verticalScrollBar().rangeChanged.connect(lambda *_: self._update_scroll_to_bottom_btn())
+        self.verticalScrollBar().rangeChanged.connect(self._on_scroll_range_changed)
 
         self._entries: list[str] = []  # plain-text mirror, for tests/back-compat
 
@@ -339,7 +341,7 @@ class LogView(QScrollArea):
 
     # -- row builders --------------------------------------------------------
 
-    def _add_timeline_row(self, time_text: str, dot_color: str, card: QWidget) -> None:
+    def _add_timeline_row(self, time_text: str, dot_color: str, card: QWidget) -> QWidget:
         row = QWidget()
         row.setStyleSheet("background: transparent;")
         row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -356,6 +358,23 @@ class LogView(QScrollArea):
         # earlier explicit request). New content should always be visible
         # immediately, especially across windows/tabs where the log was
         # last left scrolled somewhere else.
+        self._scroll_to_bottom()
+        return row
+
+    def _keep_active_group_last(self) -> None:
+        """Keep the live green task card below streamed agent narration."""
+        group = self._active_group
+        if group is None or group.get("completed"):
+            return
+        row = group.get("row")
+        if row is None:
+            return
+        current_index = self._layout.indexOf(row)
+        target_index = self._layout.count() - 2  # immediately before trailing stretch
+        if current_index < 0 or current_index == target_index:
+            return
+        self._layout.removeWidget(row)
+        self._layout.insertWidget(self._layout.count() - 1, row)
         self._scroll_to_bottom()
 
     def _build_rail(self, time_text: str, dot_color: str) -> QWidget:
@@ -566,8 +585,9 @@ class LogView(QScrollArea):
             )
         )
 
-        self._add_timeline_row(time_text, COLOR_THINKING_ACCENT, card)
+        row = self._add_timeline_row(time_text, COLOR_THINKING_ACCENT, card)
         self._active_group = {
+            "row": row,
             "status_label": status_label,
             "body_layout": body_layout,
             "toggle": toggle,
@@ -645,6 +665,7 @@ class LogView(QScrollArea):
             pending["text"] = combined
             pending["body"].setProperty("raw_text", combined)
             pending["body"].setText(_with_soft_wrap_points(combined))
+            self._keep_active_group_last()
             self._plain_row_content_grew()
             return
         border_color, header_label, header_color = _CARD_STYLE["agent"]
@@ -662,6 +683,7 @@ class LogView(QScrollArea):
         layout.addWidget(body)
         self._add_timeline_row(time_text, border_color, card)
         self._pending_thinking_row = {"body": body, "text": text}
+        self._keep_active_group_last()
 
     def _plain_row_content_grew(self) -> None:
         """_add_timeline_row's scroll-to-bottom only runs when a new row is
@@ -806,28 +828,22 @@ class LogView(QScrollArea):
         # handler is what actually shows it (this only fills content in).
 
     def _scroll_to_bottom(self) -> None:
-        # Only follow the log automatically while the user is already at (or
-        # very near) the bottom -- confirmed live 2026-08-01 that
-        # unconditional auto-scroll (a prior explicit request) yanked the
-        # view back down mid-read the moment a new message landed, the
-        # instant the user scrolled up even slightly to read something
-        # earlier. Captured *before* the deferred layout-settle below, since
-        # bar.maximum() is about to change once the new content lands and
-        # would otherwise always read as "not at bottom" by then.
-        bar = self.verticalScrollBar()
-        was_at_bottom = bar.value() >= bar.maximum() - self._AT_BOTTOM_TOLERANCE_PX
-        if not was_at_bottom:
-            return
-        # bar.maximum() right after insertWidget() still reflects the layout
-        # from *before* this row -- Qt hasn't recomputed geometry yet, so
-        # this landed short of the real bottom whenever a card was tall
-        # (multi-line agent replies, tool output). Deferring one event-loop
-        # tick lets the layout pass happen first.
+        # Always follow the live edge.  This is also called while the current
+        # thinking row grows in place, so streamed agent output stays visible
+        # without requiring the user to keep dragging the scrollbar down.
+        # Defer until Qt has recalculated the layout and the new maximum.
         QTimer.singleShot(0, self._scroll_to_bottom_now)
 
     def _scroll_to_bottom_now(self) -> None:
         bar = self.verticalScrollBar()
         bar.setValue(bar.maximum())
+
+    def _on_scroll_range_changed(self, _minimum: int, _maximum: int) -> None:
+        # A wrapped card can trigger several geometry passes.  Follow every
+        # new maximum so a tall streamed reply cannot leave the viewport a
+        # few lines short of the actual live edge.
+        self._scroll_to_bottom_now()
+        self._update_scroll_to_bottom_btn()
 
     def _update_scroll_to_bottom_btn(self) -> None:
         bar = self.verticalScrollBar()
@@ -848,3 +864,122 @@ class LogView(QScrollArea):
             self.width() - self._scroll_to_bottom_btn.width() - margin,
             self.height() - self._scroll_to_bottom_btn.height() - margin,
         )
+
+
+class ConversationLogView(QWidget):
+    """Switchable combined timeline or resizable activity/chat split view."""
+
+    retry_requested = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self._stack = QStackedWidget()
+        outer.addWidget(self._stack)
+
+        self._combined = LogView()
+        self._combined.retry_requested.connect(self.retry_requested)
+        self._stack.addWidget(self._combined)
+
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter.setChildrenCollapsible(False)
+        self._activity = LogView()
+        self._chat = LogView()
+        self._activity.retry_requested.connect(self.retry_requested)
+        self._chat.retry_requested.connect(self.retry_requested)
+        self._chat_pane = self._pane("Conversation", self._chat)
+        self._activity_pane = self._pane("Activity", self._activity)
+        self._splitter.addWidget(self._chat_pane)
+        self._splitter.addWidget(self._activity_pane)
+        self._split_position = "right"
+        self.set_split_position(self._split_position)
+        self._stack.addWidget(self._splitter)
+
+    @staticmethod
+    def _pane(title: str, view: LogView) -> QWidget:
+        pane = QWidget()
+        layout = QVBoxLayout(pane)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        header = QLabel(title)
+        header.setContentsMargins(SPACE_MD, SPACE_XS, SPACE_MD, SPACE_XS)
+        header.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; font-size: 12px; font-weight: 700; "
+            f"background-color: {COLOR_THINKING_BG}; border-bottom: 1px solid {BORDER};"
+        )
+        layout.addWidget(header)
+        layout.addWidget(view, 1)
+        return pane
+
+    def set_split_enabled(self, enabled: bool) -> None:
+        self._stack.setCurrentWidget(self._splitter if enabled else self._combined)
+
+    def split_enabled(self) -> bool:
+        return self._stack.currentWidget() is self._splitter
+
+    def set_split_position(self, position: str) -> None:
+        if position not in ("left", "right", "top", "bottom"):
+            position = "right"
+        self._split_position = position
+        vertical = position in ("top", "bottom")
+        self._splitter.setOrientation(
+            Qt.Orientation.Vertical if vertical else Qt.Orientation.Horizontal
+        )
+        activity_first = position in ("left", "top")
+        first = self._activity_pane if activity_first else self._chat_pane
+        second = self._chat_pane if activity_first else self._activity_pane
+        self._splitter.insertWidget(0, first)
+        self._splitter.insertWidget(1, second)
+        self._splitter.setStretchFactor(0, 1 if activity_first else 2)
+        self._splitter.setStretchFactor(1, 2 if activity_first else 1)
+        extent = self.height() if vertical else self.width()
+        extent = max(extent, 600)
+        smaller = extent // 3
+        larger = extent - smaller
+        self._splitter.setSizes(
+            [smaller, larger] if activity_first else [larger, smaller]
+        )
+
+    def split_position(self) -> str:
+        return self._split_position
+
+    def append_entry(
+        self,
+        kind: str,
+        text: str,
+        *,
+        collapsed: bool = False,
+        title: str | None = None,
+        timestamp: datetime | None = None,
+        meta: dict | None = None,
+        code: str | None = None,
+    ) -> None:
+        kwargs = {
+            "collapsed": collapsed,
+            "title": title,
+            "timestamp": timestamp,
+            "meta": meta,
+            "code": code,
+        }
+        self._combined.append_entry(kind, text, **kwargs)
+
+        activity_kind = kind in ("tool_call", "tool_result", "system")
+        if kind == "error" and self._activity._pending_tool is not None:
+            activity_kind = True
+        target = self._activity if activity_kind else self._chat
+        target.append_entry(kind, text, **kwargs)
+
+    def note_progress(self, text: str) -> None:
+        self._combined.note_progress(text)
+        self._activity.note_progress(text)
+
+    def clear(self) -> None:
+        self._combined.clear()
+        self._activity.clear()
+        self._chat.clear()
+
+    def toPlainText(self) -> str:  # noqa: N802 -- compatibility with LogView
+        return self._combined.toPlainText()

@@ -1,7 +1,7 @@
 [project]
 name = "openhands-desktop"
 version = "0.1.0"
-description = "Native PySide6 desktop client for the OpenHands agent-server"
+description = "Native PySide6 desktop client for the OpenHands app-server"
 requires-python = ">=3.12"
 dependencies = [
     "aiosqlite>=0.22.1",

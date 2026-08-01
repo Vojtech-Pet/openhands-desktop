@@ -1,55 +1,50 @@
-"""REST client for the new (Agent Canvas-era) OpenHands Agent Server: one
-long-running server instance hosting every conversation directly, verified
-live against a real running agent-server 1.40.0 on 2026-08-01 (see
-`/tmp/agent-server-openapi.json` captured from that run, and
-openhands.agent_server's own router source for the authoritative
-definitions).
-
-Replaces the old two-tier split entirely:
-- AppServerClient (port 3000, orchestrated N per-conversation sandbox
-  containers, async start-task polling) is gone -- POST /api/conversations
-  now creates and returns a conversation synchronously, no polling.
-- SandboxConversationClient (talked to one conversation's own container at
-  its own conversation_url/session_api_key) is gone too -- interrupt/pause/
-  condense/switch_llm are now just more paths on this same client, against
-  this same server.
+"""REST client for the OpenHands app-server, using only endpoints verified
+live against a running server on 2026-07-27 (see app_conversation_router.py /
+status_router.py in the OpenHands source for the authoritative definitions).
 """
 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import httpx
 
-from openhands_desktop.api.models import AppConversation, LlmProfile
+from openhands_desktop.api.models import AppConversation, AppConversationStartTask, LlmProfile
 
-DEFAULT_WORKSPACE_PATH = "workspace/project"
+# Confirmed live 2026-07-28: the sandbox's repo root for a fresh conversation
+# with no `selected_repository` given. The API has no per-conversation way to
+# ask for this path directly, so it's a convention, not a guarantee.
+DEFAULT_WORKSPACE_PATH = "/workspace/project"
 DEFAULT_SETTINGS_CACHE_PATH = Path.home() / ".config" / "openhands-desktop" / "settings-cache.json"
 
 
 class AppServerClient:
-    """Name kept as `AppServerClient` (not renamed to e.g. AgentServerClient)
-    to minimize churn in the UI layer, which was written against the old
-    class -- it now talks to the Agent Server instead, everywhere."""
-
-    def __init__(self, base_url: str = "http://127.0.0.1:8010", session_api_key: str | None = None) -> None:
+    def __init__(self, base_url: str | None = None) -> None:
+        if base_url is None:
+            base_url = os.getenv("OPENHANDS_APP_SERVER_URL", "http://127.0.0.1:3000")
         self.base_url = base_url.rstrip("/")
-        self.session_api_key = session_api_key
-        headers = {"X-Session-API-Key": session_api_key} if session_api_key else {}
-        # retries=1: same rationale as the old client -- a pooled keep-alive
-        # connection closed server-side right as it's reused shouldn't be a
-        # user-visible failure for an idempotent GET/POST.
+        # retries=1 covers a specific, harmless race: uvicorn closes an idle
+        # keep-alive connection after its own timeout, and if httpx reuses
+        # that exact pooled connection just as/after that happens, the
+        # request fails with "Server disconnected without sending a
+        # response." -- confirmed live 2026-07-31 via the status-polling
+        # loop's error_occurred signal. httpx's own documented fix: retry
+        # once on a fresh connection (safe here, every call this client
+        # makes is either GET or an idempotent-in-practice POST/DELETE that
+        # never partially applied on the failed attempt, since it never
+        # reached the server).
         transport = httpx.AsyncHTTPTransport(retries=1)
-        self._client = httpx.AsyncClient(
-            base_url=self.base_url, timeout=30.0, transport=transport, headers=headers
-        )
+        self._client = httpx.AsyncClient(base_url=self.base_url, timeout=30.0, transport=transport)
         self._settings_cache_path = DEFAULT_SETTINGS_CACHE_PATH
 
     def _load_cached_settings(self) -> dict:
         try:
             data = self._settings_cache_path.read_text(encoding="utf-8")
-        except (FileNotFoundError, OSError):
+        except FileNotFoundError:
+            return {}
+        except OSError:
             return {}
         try:
             return json.loads(data)
@@ -62,6 +57,17 @@ class AppServerClient:
             self._settings_cache_path.write_text(json.dumps(settings, indent=2, sort_keys=True), encoding="utf-8")
         except OSError:
             pass
+
+    async def _request_json(self, method: str, path: str, **kwargs) -> dict:
+        try:
+            resp = await getattr(self._client, method)(path, **kwargs)
+            resp.raise_for_status()
+            return resp.json()
+        except (httpx.HTTPError, httpx.TimeoutException, httpx.ConnectError):
+            cached = self._load_cached_settings()
+            if cached:
+                return cached
+            raise
 
     async def _request_json_with_cache(self, method: str, path: str, **kwargs) -> dict:
         try:
@@ -76,150 +82,8 @@ class AppServerClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def health(self) -> bool:
-        try:
-            resp = await self._client.get("/health")
-            return resp.status_code == 200 and resp.json().get("status") == "ok"
-        except httpx.HTTPError:
-            return False
-
-    # -- Conversation lifecycle -------------------------------------------
-
-    async def start_conversation(
-        self,
-        *,
-        llm_model: str,
-        llm_base_url: str | None = None,
-        llm_api_key: str | None = None,
-        initial_message_text: str | None = None,
-        tools: list[str] | None = None,
-        agent_profile: str | None = None,
-        system_message_suffix: str | None = None,
-        mcp_config: dict | None = None,
-    ) -> AppConversation:
-        """Synchronous now, unlike the old app-server: the response IS the
-        finished conversation, not a task id to poll (verified live --
-        POST /api/conversations returns the full AppConversationInfo-
-        shaped object immediately, execution_status already resolved).
-
-        `agent_profile` (an `agent-profiles` name, e.g. our
-        "project-module-engineer" subagent) is not yet wired up here --
-        this app doesn't manage agent-profiles server-side yet, only the
-        default inline `agent.llm`/`agent.tools` shape.
-
-        `mcp_config`: unlike the old app-server, a new conversation here
-        does NOT inherit the global /api/settings agent_settings.mcp_config
-        automatically -- confirmed live 2026-08-01, a conversation started
-        right after registering this app's ask-user/workspace-bridge MCP
-        servers in global settings still came back with agent.mcp_config
-        == {} and neither tool available, sending a real conversation into
-        a host-path-confusion loop with no way to actually connect the
-        folder it needed. Callers must pass the current mcp_config
-        explicitly per conversation.
-        """
-        agent: dict = {
-            "llm": {
-                "model": llm_model,
-                "usage_id": "agent",
-            },
-            "tools": [{"name": name} for name in (tools or ["terminal", "file_editor", "task_tracker", "browser_tool_set"])],
-            "kind": "Agent",
-        }
-        if llm_base_url:
-            agent["llm"]["base_url"] = llm_base_url
-        if llm_api_key:
-            agent["llm"]["api_key"] = llm_api_key
-        if system_message_suffix:
-            agent["system_prompt_kwargs"] = {"system_message_suffix": system_message_suffix}
-        if mcp_config:
-            agent["mcp_config"] = mcp_config
-        payload: dict = {
-            "workspace": {"working_dir": DEFAULT_WORKSPACE_PATH, "kind": "LocalWorkspace"},
-            "agent": agent,
-        }
-        if initial_message_text:
-            payload["initial_message"] = {"content": [{"text": initial_message_text}]}
-        resp = await self._client.post("/api/conversations", json=payload)
-        resp.raise_for_status()
-        return AppConversation.from_json(resp.json())
-
-    async def get_conversation(self, conversation_id: str) -> AppConversation:
-        resp = await self._client.get(f"/api/conversations/{conversation_id}")
-        resp.raise_for_status()
-        return AppConversation.from_json(resp.json())
-
-    async def search_conversations(self, limit: int = 50) -> list[AppConversation]:
-        resp = await self._client.get("/api/conversations/search", params={"limit": limit})
-        resp.raise_for_status()
-        return [AppConversation.from_json(item) for item in resp.json().get("items", [])]
-
-    async def delete_conversation(self, conversation_id: str) -> None:
-        resp = await self._client.delete(f"/api/conversations/{conversation_id}")
-        if resp.status_code == 404:
-            return  # already gone -- goal state achieved, not a failure (see openhands-desktop's client.py precedent)
-        resp.raise_for_status()
-
-    async def send_message(self, conversation_id: str, text: str, *, run: bool = True) -> None:
-        resp = await self._client.post(
-            f"/api/conversations/{conversation_id}/events",
-            json={"role": "user", "content": [{"text": text}], "run": run},
-        )
-        resp.raise_for_status()
-
-    async def search_events(
-        self, conversation_id: str, *, limit: int = 100, page_id: str | None = None
-    ) -> dict:
-        params: dict = {"limit": limit}
-        if page_id:
-            params["page_id"] = page_id
-        resp = await self._client.get(f"/api/conversations/{conversation_id}/events/search", params=params)
-        resp.raise_for_status()
-        return resp.json()
-
-    # -- Run control (used to live in SandboxConversationClient, one per
-    # conversation container -- now just more paths on this one client) ---
-
-    async def pause(self, conversation_id: str) -> None:
-        resp = await self._client.post(f"/api/conversations/{conversation_id}/pause")
-        resp.raise_for_status()
-
-    async def interrupt(self, conversation_id: str) -> None:
-        resp = await self._client.post(f"/api/conversations/{conversation_id}/interrupt")
-        resp.raise_for_status()
-
-    async def condense(self, conversation_id: str) -> None:
-        resp = await self._client.post(f"/api/conversations/{conversation_id}/condense")
-        resp.raise_for_status()
-
-    async def switch_llm(self, conversation_id: str, llm_config: dict) -> None:
-        resp = await self._client.post(
-            f"/api/conversations/{conversation_id}/switch_llm", json={"llm": llm_config}
-        )
-        resp.raise_for_status()
-
-    # -- LLM profiles (server-side /api/profiles -- present on the new
-    # server too, not yet wired up beyond this passthrough) ---------------
-
-    async def get_desktop_url(self) -> str | None:
-        """The new server exposes its own /api/desktop/url directly --
-        replaces the old per-sandbox noVNC-exposed-port lookup entirely
-        (verified live in the OpenAPI schema: GET /api/desktop/url,
-        GET /api/vscode/url). Desktop must be enabled server-side
-        (OH_ENABLE_DESKTOP=1 or similar) or this returns None/404."""
-        resp = await self._client.get("/api/desktop/url")
-        if resp.status_code == 404:
-            return None
-        resp.raise_for_status()
-        return resp.json().get("url")
-
-    # -- LLM profiles, settings, skills -- verified live 2026-08-01 against
-    # agent-server 1.40.0's real request/response bodies, structurally very
-    # close to the old app-server's own shapes (this server was clearly
-    # designed as its logical successor for these endpoints specifically,
-    # unlike the conversation-lifecycle ones which changed completely). --
-
     async def list_llm_profiles(self) -> tuple[list[LlmProfile], str | None]:
-        resp = await self._client.get("/api/profiles")
+        resp = await self._client.get("/api/v1/settings/profiles")
         resp.raise_for_status()
         data = resp.json()
         profiles = [LlmProfile.from_json(p) for p in data.get("profiles", [])]
@@ -248,16 +112,19 @@ class AppServerClient:
         litellm_extra_body: dict | None = None,
         extra_config: dict | None = None,
     ) -> None:
-        """Kept the old app-server client's rich signature (same kwargs,
-        same dict-assembly logic) rather than changing every call site --
-        only the wire format at the end changed: POST /api/profiles/{name}
-        with {"llm": ..., "include_secrets": ...} (verified live), not the
-        old {"llm": ..., "preserve_existing_api_key": ...}. Semantics also
-        flipped: `include_secrets=True` means "persist the api_key value
-        with this profile" (default), which is the closest equivalent to
-        the old "don't preserve [drop] the existing key" default of False
-        -- both boil down to "send whatever key we actually have."
+        """Creates the profile if `name` is new, or overwrites it if it
+        already exists -- same endpoint covers both Add and Edit (confirmed
+        live: POST /api/v1/settings/profiles/{name} returns 201 either way).
+
+        `temperature`/`top_p`/`top_k` are real top-level StrictLLM fields
+        (confirmed live via GET /api/v1/settings/profiles/{name}); min_p,
+        presence_penalty, repetition_penalty, and chat_template_kwargs
+        (preserve_thinking) are NOT top-level fields on this model -- they
+        only exist inside the free-form `litellm_extra_body` dict.
         """
+        # The profile endpoint replaces the complete LLM object. Start from
+        # the fetched config when editing so controls exposed by another
+        # client/version are not silently discarded.
         llm: dict = dict(extra_config or {})
         llm.pop("api_key", None)
         llm["model"] = model
@@ -293,42 +160,52 @@ class AppServerClient:
             llm["extended_thinking_budget"] = extended_thinking_budget
         if litellm_extra_body is not None:
             llm["litellm_extra_body"] = litellm_extra_body
-        payload = {"llm": llm, "include_secrets": not preserve_existing_api_key or bool(api_key)}
-        resp = await self._client.post(f"/api/profiles/{name}", json=payload)
+        payload = {"llm": llm, "preserve_existing_api_key": preserve_existing_api_key}
+        resp = await self._client.post(f"/api/v1/settings/profiles/{name}", json=payload)
         resp.raise_for_status()
 
     async def get_profile_detail(self, name: str) -> dict:
-        """Returns the raw {"name", "config"} response -- unlike the old
-        app-server, the LLM config is nested under "config" here (verified
-        live), not flat. Callers that already did `data.get("config")` on
-        the old (already-flat, so this was a no-op there) response keep
-        working unchanged."""
-        resp = await self._client.get(f"/api/profiles/{name}")
+        """Full LLM config for one profile (api_key nulled out, api_key_set
+        reports whether one is stored) -- used to pre-fill the Edit form
+        with the profile's *current* sampling settings, which the list
+        endpoint doesn't include."""
+        resp = await self._client.get(f"/api/v1/settings/profiles/{name}")
         resp.raise_for_status()
         return resp.json()
 
     async def delete_profile(self, name: str) -> None:
-        resp = await self._client.delete(f"/api/profiles/{name}")
+        resp = await self._client.delete(f"/api/v1/settings/profiles/{name}")
         resp.raise_for_status()
 
     async def activate_profile(self, name: str) -> None:
-        resp = await self._client.post(f"/api/profiles/{name}/activate")
+        """Server-side activation: switches `agent_settings.llm` so this
+        profile becomes the account-wide default, not just this client's
+        toolbar selection."""
+        resp = await self._client.post(f"/api/v1/settings/profiles/{name}/activate")
         resp.raise_for_status()
 
     async def get_settings(self) -> dict:
-        """Raw settings blob -- verified live to still have the
-        `agent_settings` top-level key the old app-server's did, though the
-        nested shape has moved on (schema_version 5, agent_kind, etc).
-        Falls back to the last locally cached snapshot when offline, same
-        as before."""
-        return await self._request_json_with_cache("get", "/api/settings")
+        """Returns the raw settings JSON (confirmed live 2026-07-28): a large,
+        mostly-flat blob with `agent_settings` (agent, condenser, mcp_config,
+        agent_context, ...) and `conversation_settings` (confirmation_mode,
+        security_analyzer) nested inside. Kept as a raw dict rather than a
+        fully typed model -- the surface is large and most of it isn't used
+        here; callers pick out the fields they need. Falls back to the last
+        locally cached snapshot when the server is unavailable."""
+        return await self._request_json_with_cache("get", "/api/v1/settings")
 
     async def update_settings(self, payload: dict) -> None:
-        """PATCH, not POST -- the new server uses PATCH /api/settings for a
-        partial update (verified live in the OpenAPI schema), where the old
-        app-server used POST /api/v1/settings for the same semantics."""
+        """POST /api/v1/settings deep-merges `agent_settings_diff` and
+        `conversation_settings_diff` with existing values (confirmed live)
+        -- a partial diff is safe and won't clobber sibling fields, with one
+        exception: `agent_settings_diff.mcp_config` is validated/replaced as
+        a whole unit, not merged per-server-entry (confirmed live: adding one
+        new MCP server via a partial diff silently wiped out the others) --
+        callers touching mcp_config must always send the complete resulting
+        dict, never a partial one. When the server is offline, the update is
+        still persisted into the local settings cache so the UI stays usable."""
         try:
-            resp = await self._client.patch("/api/settings", json=payload)
+            resp = await self._client.post("/api/v1/settings", json=payload)
             resp.raise_for_status()
         except (httpx.HTTPError, httpx.TimeoutException, httpx.ConnectError):
             cached = self._load_cached_settings()
@@ -342,6 +219,7 @@ class AppServerClient:
                     merged[key] = value
             self._save_cached_settings(merged)
             return
+
         cached = self._load_cached_settings()
         if isinstance(cached, dict):
             merged = dict(cached)
@@ -353,43 +231,251 @@ class AppServerClient:
             self._save_cached_settings(merged)
 
     async def list_skills(self) -> list[dict]:
-        """/api/skills/search doesn't exist on the new server -- the closest
-        equivalent is /api/skills/installed (verified live), which is not
-        quite the same thing (installed vs. searchable/available), but is
-        what's actually wired up server-side for this app to read."""
-        resp = await self._client.get("/api/skills/installed")
+        resp = await self._client.get("/api/v1/skills/search", params={"limit": 100})
         resp.raise_for_status()
-        return resp.json().get("skills", [])
+        return resp.json().get("items", [])
 
     async def list_secrets(self) -> list[dict]:
-        """/api/settings/secrets (verified live), not /api/v1/secrets like
-        the old app-server -- same PUT-to-create-or-update, single-item-
-        delete semantics though, so this is otherwise a straight port."""
-        resp = await self._client.get("/api/settings/secrets")
+        resp = await self._client.get("/api/v1/secrets/search", params={"limit": 100})
         resp.raise_for_status()
-        return resp.json().get("secrets", [])
+        return resp.json().get("items", [])
 
     async def create_secret(self, name: str, value: str, description: str | None = None) -> None:
-        resp = await self._client.put(
-            "/api/settings/secrets", json={"name": name, "value": value, "description": description}
+        resp = await self._client.post(
+            "/api/v1/secrets", json={"name": name, "value": value, "description": description}
         )
         resp.raise_for_status()
 
-    async def update_secret(self, name: str, value: str, description: str | None = None) -> None:
-        """Same PUT endpoint as create -- it's create-or-update by name
-        (verified live), there's no separate update-by-id route like the
-        old app-server's PUT /api/v1/secrets/{secret_id} (secrets here are
-        keyed by name directly, not a separate opaque id)."""
-        await self.create_secret(name, value, description)
-
-    async def delete_secret(self, name: str) -> None:
-        resp = await self._client.delete(f"/api/settings/secrets/{name}")
+    async def update_secret(self, secret_id: str, name: str, description: str | None = None) -> None:
+        resp = await self._client.put(
+            f"/api/v1/secrets/{secret_id}", json={"name": name, "description": description}
+        )
         resp.raise_for_status()
 
-    # -- No equivalent found on the new server (checked its full OpenAPI
-    # schema -- not present under any path): git-provider OAuth token
-    # storage (the old app-server's /api/v1/secrets/git-providers, which
-    # validated tokens against the real provider API before storing them).
-    # The Integrations settings page should show "not available yet"
-    # rather than call something that doesn't exist. See
-    # MIGRATION_STATUS.md.
+    async def delete_secret(self, secret_id: str) -> None:
+        resp = await self._client.delete(f"/api/v1/secrets/{secret_id}")
+        resp.raise_for_status()
+
+    async def store_git_provider_token(self, provider: str, token: str) -> None:
+        """The server validates the token against the real provider API
+        before storing it (confirmed live: a fake token returns 401
+        "Invalid token"). Sends only the one provider being connected --
+        merge-vs-replace semantics for sibling providers aren't confirmed
+        against a populated account, so callers should warn accordingly."""
+        resp = await self._client.post(
+            "/api/v1/secrets/git-providers",
+            json={"provider_tokens": {provider: {"token": token}}},
+        )
+        resp.raise_for_status()
+
+    async def unset_git_provider_tokens(self) -> None:
+        """Unsets ALL configured git provider tokens at once -- there is no
+        per-provider disconnect endpoint (confirmed live)."""
+        resp = await self._client.delete("/api/v1/secrets/git-providers")
+        resp.raise_for_status()
+
+    async def health(self) -> bool:
+        try:
+            resp = await self._client.get("/health")
+            return resp.status_code == 200 and resp.json() == "OK"
+        except httpx.HTTPError:
+            return False
+
+    async def start_conversation(
+        self,
+        *,
+        llm_model: str | None = None,
+        selected_repository: str | None = None,
+        initial_message_text: str | None = None,
+        agent_type: str | None = None,
+        parent_conversation_id: str | None = None,
+        system_message_suffix: str | None = None,
+    ) -> AppConversationStartTask:
+        """`agent_type`: "default" (terminal, file_editor, ... -- full
+        read/write agent) or "plan" (glob, grep, planning_file_editor,
+        finish, think only -- no terminal, read-only). Confirmed directly
+        in AppConversationStartRequest / AgentType in the OpenHands source,
+        not assumed.
+
+        `system_message_suffix` is the ONLY working channel for custom
+        agent instructions in this deployment. Setting
+        `agent_settings.agent_context.system_message_suffix` looks like it
+        should work -- it saves, reads back, and renders in the settings UI
+        -- but has no effect: the app-server discards the stored
+        agent_context and rebuilds it from the *start request* instead
+        (live_status_app_conversation_service.py builds
+        `AgentContext(system_message_suffix=effective_suffix, secrets=...)`
+        from `request.system_message_suffix`). Verified live 2026-07-29 on
+        fresh conversations: text saved in settings appears in neither the
+        system prompt nor the dynamic context, while text passed here does.
+        The same overwrite silently drops `agent_context.skills` and
+        `load_user_skills`, which is why user skills never reach the agent.
+        """
+        payload: dict = {}
+        if llm_model:
+            payload["llm_model"] = llm_model
+        if selected_repository:
+            payload["selected_repository"] = selected_repository
+        if agent_type:
+            payload["agent_type"] = agent_type
+        if parent_conversation_id:
+            payload["parent_conversation_id"] = parent_conversation_id
+        if system_message_suffix:
+            payload["system_message_suffix"] = system_message_suffix
+        if initial_message_text:
+            payload["initial_message"] = {
+                "role": "user",
+                "content": [{"type": "text", "text": initial_message_text}],
+            }
+        resp = await self._client.post("/api/v1/app-conversations", json=payload)
+        resp.raise_for_status()
+        return AppConversationStartTask.from_json(resp.json())
+
+    async def get_start_task(self, task_id: str) -> AppConversationStartTask:
+        resp = await self._client.get(
+            "/api/v1/app-conversations/start-tasks/search", params={"ids": task_id}
+        )
+        resp.raise_for_status()
+        items = resp.json()["items"]
+        if not items:
+            raise LookupError(f"start task {task_id} not found")
+        return AppConversationStartTask.from_json(items[0])
+
+    async def get_conversation(self, conversation_id: str) -> AppConversation:
+        """Uses /search?ids=... instead of the direct GET
+        /api/v1/app-conversations/{id} route -- confirmed live 2026-07-29
+        against the current docker.openhands.dev/openhands/openhands:latest
+        image that the direct route returns 200 with the frontend's HTML
+        shell (a React Router SPA fallback winning over the API route),
+        not JSON, which crashed every caller with a JSONDecodeError
+        ("Expecting value: line 1 column 1"). /search correctly returns
+        application/json either way, so it's used as the single-conversation
+        lookup unconditionally rather than only as a fallback.
+
+        `include_sub_conversations=true` matters here too, and not just for
+        the list endpoint: confirmed live 2026-07-31 that even a single
+        by-id lookup returns `parent_conversation_id: null` for a genuine
+        Continue-as-Code child without this flag -- silently breaking
+        anything that reads it (e.g. resolving the Plan/Code family before
+        a delete).
+        """
+        resp = await self._client.get(
+            "/api/v1/app-conversations/search",
+            params={"ids": conversation_id, "include_sub_conversations": "true"},
+        )
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
+        if not items:
+            raise LookupError(f"conversation {conversation_id} not found")
+        return AppConversation.from_json(items[0])
+
+    async def get_novnc_url(self, sandbox_id: str) -> str | None:
+        """Web URL for the sandbox's noVNC browser preview (see docker_sandbox_service.py's
+        NOVNC exposed port, 2026-07-30) -- only present when the sandbox image was
+        started with OH_ENABLE_VNC=1. Returns None if VNC isn't exposed for this sandbox."""
+        resp = await self._client.get("/api/v1/sandboxes", params={"id": sandbox_id})
+        resp.raise_for_status()
+        sandboxes = resp.json()
+        if not sandboxes or sandboxes[0] is None:
+            return None
+        for exposed in sandboxes[0].get("exposed_urls") or []:
+            if exposed.get("name") == "NOVNC":
+                return exposed.get("url")
+        return None
+
+    async def search_conversations(self, limit: int = 50) -> list[AppConversation]:
+        """Every conversation on the server with its live execution_status/
+        sandbox_status, not just what's in the local HistoryStore cache --
+        source of truth for a Mission-Control-style task board.
+
+        `include_sub_conversations=true` is required -- without it, the
+        server only returns top-level conversations and silently omits any
+        Continue-as-Code child (parent_conversation_id set), even while it's
+        actively running (confirmed live 2026-07-31: a Code continuation
+        LM Studio was actively generating for was completely invisible to
+        this call, so every caller that treats an empty/finished-only
+        result as "nothing else running" -- shutdown's model-unload safety
+        check, the VRAM-unload button's safety check, Mission Control --
+        was blind to it)."""
+        resp = await self._client.get(
+            "/api/v1/app-conversations/search",
+            params={"limit": limit, "include_sub_conversations": "true"},
+        )
+        resp.raise_for_status()
+        return [AppConversation.from_json(item) for item in resp.json().get("items", [])]
+
+    async def send_message(
+        self,
+        conversation_id: str,
+        text: str,
+        file_attachments: list[str] | None = None,
+    ) -> None:
+        """Send message with optional file attachments.
+
+        Args:
+            conversation_id: Target conversation
+            text: Message text
+            file_attachments: List of file_ids (from FileManager.upload_file)
+        """
+        content = [{"type": "text", "text": text}]
+
+        if file_attachments:
+            for file_id in file_attachments:
+                content.append({"type": "file", "file_id": file_id})
+
+        resp = await self._client.post(
+            f"/api/v1/app-conversations/{conversation_id}/send-message",
+            json={"role": "user", "content": content, "run": True},
+        )
+        resp.raise_for_status()
+
+    async def search_events(
+        self, conversation_id: str, *, limit: int = 100, page_id: str | None = None
+    ) -> dict:
+        """REST fallback for event history (used on load / reconnect, never as
+        the live-update path -- live updates come from the WebSocket only).
+        """
+        params: dict = {"limit": limit}
+        if page_id:
+            params["page_id"] = page_id
+        resp = await self._client.get(
+            f"/api/v1/conversation/{conversation_id}/events/search", params=params
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def delete_conversation(self, conversation_id: str) -> None:
+        resp = await self._client.delete(f"/api/v1/app-conversations/{conversation_id}")
+        if resp.status_code == 404:
+            # Already gone (deleted by a previous action, or its sandbox
+            # was cleaned up separately) -- confirmed live 2026-08-01 this
+            # surfaced as a spurious "1 failed" in a bulk delete for a
+            # conversation that was already fully gone server-side. The
+            # goal state (conversation absent) is already achieved, so
+            # this is success, not a failure to report or retry.
+            return
+        resp.raise_for_status()
+
+    async def get_git_changes(self, conversation_id: str, path: str) -> list[dict]:
+        """`path` is the absolute repo root inside the sandbox -- confirmed
+        live 2026-07-28 to be /workspace/project by default (see
+        DEFAULT_WORKSPACE_PATH), since the app-server API has no
+        per-conversation way to ask for this directly."""
+        resp = await self._client.get(
+            f"/api/v1/app-conversations/{conversation_id}/git/changes", params={"path": path}
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def get_git_diff(self, conversation_id: str, path: str, ref: str | None = None) -> dict:
+        """Returns {"original": ..., "modified": ...} -- full file contents on
+        each side, not a unified diff (confirmed live) -- callers diff them
+        client-side."""
+        params: dict = {"path": path}
+        if ref:
+            params["ref"] = ref
+        resp = await self._client.get(
+            f"/api/v1/app-conversations/{conversation_id}/git/diff", params=params
+        )
+        resp.raise_for_status()
+        return resp.json()

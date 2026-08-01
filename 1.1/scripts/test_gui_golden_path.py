@@ -1,6 +1,7 @@
 """Real GUI click-through test: instantiates the actual MainWindow, types a
 message with QTest, clicks Send, and waits for a real reply to land in the
-log view -- against the real dev agent-server + real LM Studio, not mocked.
+log view -- against the real OpenHands app-server + real LM Studio, not
+mocked.
 Runs offscreen (QT_QPA_PLATFORM=offscreen), not part of the shipped app.
 
 Uses an isolated history DB (not the real one) to avoid touching v1.0's
@@ -14,8 +15,6 @@ import tempfile
 
 sys.path.insert(0, "src")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-os.environ["AGENT_SERVER_URL"] = "http://127.0.0.1:8010"
-os.environ["AGENT_SERVER_SESSION_API_KEY"] = "dev-key-123"
 
 import qasync  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
@@ -29,7 +28,7 @@ from openhands_desktop.ui.main_window import MainWindow  # noqa: E402
 
 async def main() -> int:
     tmp_db = tempfile.mktemp(suffix=".db")
-    client = AppServerClient(base_url="http://127.0.0.1:8010", session_api_key="dev-key-123")
+    client = AppServerClient(base_url="http://127.0.0.1:3000")
     history = HistoryStore(db_path=tmp_db)
     window = MainWindow(client, history_store=history)
     window.show()

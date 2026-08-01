@@ -1,5 +1,6 @@
 """Headless smoke test of api/client.py + ws_client.py against a real running
-agent-server. Not a unit test -- exercises the actual network path end to end.
+OpenHands app-server. Not a unit test -- exercises the actual network path
+end to end.
 """
 
 from __future__ import annotations

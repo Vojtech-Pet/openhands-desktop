@@ -25,6 +25,7 @@ DEFAULT_LLM_SERVER_BASE_URLS = (
 )
 _LOCAL_SERVER_HOSTS = {"127.0.0.1", "localhost", "0.0.0.0", "172.17.0.1"}
 _LMS = "/home/vojtech/.lmstudio/bin/lms"
+_FAST_PROBE_TIMEOUT = httpx.Timeout(2.0, connect=0.5, read=2.0, write=1.0, pool=0.5)
 _MODEL_LOAD_SPECS = {
     "27b": {
         "key": (
@@ -97,7 +98,7 @@ async def detect_loaded_model(base_urls: tuple[str, ...] | None = None) -> Loade
     because that is what OpenHands stores in LLM profiles.
     """
     candidates = base_urls or DEFAULT_LLM_SERVER_BASE_URLS
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    async with httpx.AsyncClient(timeout=_FAST_PROBE_TIMEOUT) as client:
         for base_url in candidates:
             root = _server_root(base_url)
             try:
@@ -138,7 +139,7 @@ async def probe_llm_server_state(base_urls: tuple[str, ...] | None = None) -> st
     This tells those two cases apart so the caller can warn specifically
     about the empty one instead of staying silent."""
     candidates = base_urls or DEFAULT_LLM_SERVER_BASE_URLS
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    async with httpx.AsyncClient(timeout=_FAST_PROBE_TIMEOUT) as client:
         for base_url in candidates:
             root = _server_root(base_url)
             try:

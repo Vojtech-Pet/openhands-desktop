@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 from pathlib import Path
 
@@ -11,6 +10,7 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication
 
 from openhands_desktop.api.client import AppServerClient
+from openhands_desktop.server_manager import APP_SERVER_URL, ensure_app_server_running
 from openhands_desktop.ui.main_window import MainWindow
 
 # Any string is fine here -- it's just the name of the local (Unix domain)
@@ -61,14 +61,9 @@ def main() -> int:
     loop = qasync.QEventLoop(app)
     asyncio.set_event_loop(loop)
 
-    # v1.1 (new Agent Server architecture, see MIGRATION_STATUS.md): one
-    # shared server, not the old per-conversation sandbox model -- base
-    # URL/key are env-driven for now while this is still an experiment,
-    # not hardcoded like the old app-server's fixed port 3000 was.
-    client = AppServerClient(
-        base_url=os.environ.get("AGENT_SERVER_URL", "http://127.0.0.1:8010"),
-        session_api_key=os.environ.get("AGENT_SERVER_SESSION_API_KEY"),
-    )
+    loop.run_until_complete(ensure_app_server_running())
+
+    client = AppServerClient(APP_SERVER_URL)
     window = MainWindow(client)
     window.setWindowIcon(app_icon)
     window.show()
