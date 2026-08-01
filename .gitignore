@@ -8,7 +8,10 @@ wheels/
 
 # Virtual environments
 .venv
-sandbox-image/agents/project-module-engineer.md
-sandbox-image/agents/windows-binary-analysis-agent.md
-sandbox-image/microagents/project-subagent-routing.md
-sandbox-image/reference/
+
+# Private local-only agent definitions (real project name/paths inside --
+# never tracked, present under both 1.0/ and 1.1/)
+**/sandbox-image/agents/project-module-engineer.md
+**/sandbox-image/agents/windows-binary-analysis-agent.md
+**/sandbox-image/microagents/project-subagent-routing.md
+**/sandbox-image/reference/

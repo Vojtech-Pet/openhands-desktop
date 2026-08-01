@@ -1,0 +1,14 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+sandbox-image/agents/project-module-engineer.md
+sandbox-image/agents/windows-binary-analysis-agent.md
+sandbox-image/microagents/project-subagent-routing.md
+sandbox-image/reference/
