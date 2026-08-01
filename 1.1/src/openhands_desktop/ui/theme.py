@@ -123,6 +123,13 @@ QWidget {{
 #MainSplitter::handle:hover {{
     background-color: {BORDER_HOVER};
 }}
+#ContentSplitter::handle {{
+    background-color: {BORDER};
+    height: 1px;
+}}
+#ContentSplitter::handle:hover {{
+    background-color: {BORDER_HOVER};
+}}
 #DetailCard {{
     background-color: {BG_SURFACE_2};
     border: 1px solid {BORDER};

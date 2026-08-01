@@ -289,8 +289,8 @@ class ChatInputEdit(QPlainTextEdit):
         self._on_focus_change = on_focus_change
         self.setPlaceholderText("What would you like the agent to do? (Ctrl+Enter to send)")
         self.setMinimumHeight(46)
-        self.setMaximumHeight(170)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
+        self.setMaximumHeight(260)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.document().contentsChanged.connect(self._fit_to_content)
         QTimer.singleShot(0, self._fit_to_content)
 
@@ -300,8 +300,8 @@ class ChatInputEdit(QPlainTextEdit):
         frame = self.frameWidth() * 2
         padding = margins.top() + margins.bottom() + frame + 10
         target = max(self.minimumHeight(), min(self.maximumHeight(), doc_height + padding))
-        if self.height() != target:
-            self.setFixedHeight(target)
+        if self.minimumHeight() != target:
+            self.setMinimumHeight(target)
             self.updateGeometry()
 
     def focusInEvent(self, event) -> None:  # noqa: N802 -- Qt override
@@ -664,6 +664,11 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(top_bar)
 
+        self.content_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.content_splitter.setObjectName("ContentSplitter")
+        self.content_splitter.setChildrenCollapsible(False)
+        main_layout.addWidget(self.content_splitter, 1)
+
         # --- stacked content: welcome vs. live chat log ---
         self.stack = QStackedWidget()
         self.stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -675,7 +680,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.welcome)
         self.stack.addWidget(self.log)
         self.stack.setCurrentWidget(self.welcome)
-        main_layout.addWidget(self.stack, 1)
+        self.content_splitter.addWidget(self.stack)
 
         # --- composer ---
         # Single bar, per the message-composer.svg reference (2026-07-30):
@@ -684,7 +689,9 @@ class MainWindow(QMainWindow):
         # previous two-column layout (composer frame + a separate Send/Stop
         # button stack beside it).
         input_row = QWidget()
-        input_row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        input_row.setMinimumHeight(118)
+        input_row.setMaximumHeight(320)
+        input_row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         input_row_layout = QVBoxLayout(input_row)
         input_row_layout.setContentsMargins(SPACE_MD, SPACE_XS, SPACE_MD, SPACE_SM)
         input_row_layout.setSpacing(0)
@@ -799,7 +806,10 @@ class MainWindow(QMainWindow):
         composer_layout.addLayout(composer_tools_row)
         input_row_layout.addWidget(composer_frame)
 
-        main_layout.addWidget(input_row)
+        self.content_splitter.addWidget(input_row)
+        self.content_splitter.setStretchFactor(0, 1)
+        self.content_splitter.setStretchFactor(1, 0)
+        self._restore_content_splitter_state()
 
         # --- bottom status bar ---
         status_bar = QWidget()
@@ -3354,9 +3364,20 @@ class MainWindow(QMainWindow):
         if not restored:
             self.main_splitter.setSizes([300, 800, 280])
 
+    def _restore_content_splitter_state(self) -> None:
+        state = self._settings.value("content_splitter_state")
+        restored = False
+        if isinstance(state, bytes):
+            restored = self.content_splitter.restoreState(state)
+        elif hasattr(state, "data"):
+            restored = self.content_splitter.restoreState(state)
+        if not restored:
+            self.content_splitter.setSizes([560, 150])
+
     def _save_window_layout(self) -> None:
         self._settings.setValue("window_geometry", self.saveGeometry())
         self._settings.setValue("main_splitter_state", self.main_splitter.saveState())
+        self._settings.setValue("content_splitter_state", self.content_splitter.saveState())
 
     def closeEvent(self, event) -> None:  # noqa: N802 -- Qt override
         self._save_window_layout()
