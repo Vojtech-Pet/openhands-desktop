@@ -672,6 +672,15 @@ class MainWindow(QMainWindow):
         status_col.addWidget(self.overall_status_sublabel)
         top_bar_layout.addWidget(self.topbar_status_widget)
 
+        self.topbar_menu_btn = QPushButton()
+        self.topbar_menu_btn.setObjectName("TopbarMoreButton")
+        self.topbar_menu_btn.setIcon(icon("menu", 18))
+        self.topbar_menu_btn.setText("More")
+        self.topbar_menu_btn.setMinimumWidth(76)
+        self.topbar_menu_btn.setToolTip("More toolbar actions")
+        self.topbar_menu_btn.clicked.connect(self._show_topbar_menu)
+        top_bar_layout.addWidget(self.topbar_menu_btn)
+
         self.panel_toggle_btn = panel_toggle_button()
         self.panel_toggle_btn.toggled.connect(self.right_panel.setVisible)
         top_bar_layout.addWidget(self.panel_toggle_btn)
@@ -682,6 +691,9 @@ class MainWindow(QMainWindow):
             self.browser_preview_btn,
             self.changes_btn,
             self.history_btn,
+            self.thinking_chip,
+            self.keep_chip,
+            self.unload_model_btn,
             self.workspace_chip,
             self.health_chip,
         )
@@ -1493,6 +1505,52 @@ class MainWindow(QMainWindow):
         )
         new_window_action.triggered.connect(self._open_new_window)
         menu.exec(self.more_btn.mapToGlobal(self.more_btn.rect().bottomLeft()))
+
+    def _show_topbar_menu(self) -> None:
+        menu = QMenu(self)
+        menu.setObjectName("ConversationActionsMenu")
+
+        unload_action = menu.addAction(icon("model-ai", 16), "Unload model")
+        unload_action.setEnabled(self.unload_model_btn.isEnabled())
+        unload_action.triggered.connect(self._on_unload_model_clicked)
+
+        menu.addSeparator()
+        think_action = menu.addAction("Thinking")
+        think_action.setCheckable(True)
+        think_action.setChecked(self.enable_thinking_check.isChecked())
+        think_action.setEnabled(self.enable_thinking_check.isEnabled())
+        think_action.toggled.connect(self.enable_thinking_check.setChecked)
+
+        keep_action = menu.addAction("Keep thinking")
+        keep_action.setCheckable(True)
+        keep_action.setChecked(self.preserve_thinking_check.isChecked())
+        keep_action.setEnabled(self.preserve_thinking_check.isEnabled())
+        keep_action.toggled.connect(self.preserve_thinking_check.setChecked)
+
+        menu.addSeparator()
+        history_action = menu.addAction(icon("history", 16), "History")
+        history_action.triggered.connect(self._refresh_sidebar_history)
+
+        changes_action = menu.addAction(icon("git-history", 16), "Changes")
+        changes_action.setEnabled(self.changes_btn.isEnabled())
+        changes_action.triggered.connect(self._open_changes)
+
+        browser_action = menu.addAction(icon("browser", 16), "Browser")
+        browser_action.setEnabled(self.browser_preview_btn.isEnabled())
+        browser_action.triggered.connect(self._open_browser_preview)
+
+        errors_text = self.errors_btn.text() or "Errors"
+        errors_action = menu.addAction(icon("error", 16), errors_text)
+        errors_action.setEnabled(self.errors_btn.isEnabled())
+        errors_action.triggered.connect(self._open_errors_dialog)
+
+        tasks_action = menu.addAction(icon("plan-tasks", 16), "Tasks")
+        tasks_action.triggered.connect(self._open_task_board)
+
+        supervised_action = menu.addAction(icon("run-task", 16), "Supervised Agent")
+        supervised_action.triggered.connect(self._open_supervised_agent)
+
+        menu.exec(self.topbar_menu_btn.mapToGlobal(self.topbar_menu_btn.rect().bottomLeft()))
 
     def _open_new_window(self) -> None:
         # Shares this process's AppServerClient and the two MCP servers
@@ -3391,38 +3449,31 @@ class MainWindow(QMainWindow):
             return
         width = self.top_bar.width()
 
-        rules = (
-            (self.supervised_agent_btn, width >= 1320),
-            (self.tasks_btn, width >= 1220),
-            (self.errors_btn, width >= 1140),
-            (self.browser_preview_btn, width >= 1060),
-            (self.changes_btn, width >= 980),
-            (self.history_btn, width >= 1040),
-            (self.topbar_status_widget, width >= 980),
-            (self.health_chip, width >= 760),
-            (self.workspace_chip, width >= 860),
-            (self.unload_model_btn, width >= 1500),
-            (self.keep_chip, width >= 1180),
-            (self.thinking_chip, width >= 1180),
-        )
-        for widget, visible in rules:
-            if widget.isVisible() != visible:
-                widget.setVisible(visible)
+        for widget in (
+            self.supervised_agent_btn,
+            self.tasks_btn,
+            self.errors_btn,
+            self.browser_preview_btn,
+            self.changes_btn,
+            self.history_btn,
+            self.unload_model_btn,
+            self.thinking_chip,
+            self.keep_chip,
+        ):
+            widget.setVisible(False)
 
-        icon_only_actions = width < 1180
-        for button, label in self._topbar_action_labels.items():
-            button.setText("" if icon_only_actions else label)
-            button.setMinimumWidth(28 if icon_only_actions else 0)
-            button.setMaximumWidth(32 if icon_only_actions else 16777215)
+        self.health_chip.setVisible(width >= 520)
+        self.workspace_chip.setVisible(width >= 620)
+        self.topbar_status_widget.setVisible(width >= 900)
 
-        compact_model = width < 1120
+        compact_model = width < 980
         self.model_chip.setMinimumWidth(118 if compact_model else 210)
         self.model_chip.setMaximumWidth(180 if compact_model else 300)
         self.model_combo.setMinimumWidth(54 if compact_model else 112)
         self.model_combo.setMinimumContentsLength(6 if compact_model else 18)
         self.model_caption.setVisible(not compact_model)
 
-        compact_left = width < 1120
+        compact_left = width < 980
         self.health_label.setText(self._health_full_text.replace("Health: ", "") if compact_left else self._health_full_text)
         self.workspace_value_label.setText("Workspace" if compact_left else self._workspace_full_text)
         self.health_chip.setMinimumWidth(62 if compact_left else 0)

@@ -102,6 +102,19 @@ QWidget {{
     background-color: {BG_SURFACE_2};
 }}
 
+#TopbarMoreButton {{
+    background-color: {BG_SURFACE_2};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS_SM}px;
+    padding: 4px 8px;
+    color: {TEXT_PRIMARY};
+    font-weight: 600;
+}}
+#TopbarMoreButton:hover {{
+    background-color: {BG_SURFACE_3};
+    border-color: {BORDER_HOVER};
+}}
+
 #StatusBarWidget {{
     background-color: {BG_SURFACE_1};
     border-top: 1px solid {BORDER};
