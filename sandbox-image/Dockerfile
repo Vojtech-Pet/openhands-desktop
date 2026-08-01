@@ -27,6 +27,17 @@ USER root
 RUN mkdir -p /home/openhands/.openhands/agents /home/openhands/.openhands/microagents \
     && chown -R 10001:10001 /home/openhands/.openhands
 
+# The project-module-engineer subagent's own playbook assumes
+# these are available (requests.Session() for page/API fetches, yt-dlp for
+# HLS/DASH inspection, ffmpeg for segment concatenation) -- confirmed live
+# 2026-08-01 none of them were actually in the base agent-server image, so
+# every real task hit "ModuleNotFoundError: No module named 'requests'" on
+# its very first HTTP call.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir --break-system-packages requests beautifulsoup4 yt-dlp
+
 COPY --chown=10001:10001 agents/      /home/openhands/.openhands/agents/
 COPY --chown=10001:10001 microagents/ /home/openhands/.openhands/microagents/
 
