@@ -2107,9 +2107,22 @@ class MainWindow(QMainWindow):
                 # whatever it was doing instead of being just another queued
                 # note to get back to once the old task is done.
                 self._user_interrupted_awaiting_priority = False
+                # Confirmed live 2026-08-01: a short question here (e.g.
+                # "aký je problém" / "what's the problem") got treated as
+                # "keep debugging to find the answer" -- the agent kept
+                # calling more tools, running the SAME investigation it was
+                # doing before Stop, instead of just answering from what it
+                # already knew. Not ignoring the priority framing exactly,
+                # but not doing what the person actually wanted either.
+                # Spelled out explicitly now: answer from existing context
+                # first, only use a tool if that's genuinely not enough.
                 outgoing_text = (
                     "PRIORITY -- you were just interrupted. Do not resume or continue "
-                    "the previous task. Read and act on this message first:\n\n" + text
+                    "the previous task. If this message is a question you can answer "
+                    "from what you already know/did, answer it directly in plain text "
+                    "-- do not call a tool just to keep investigating first. Only use "
+                    "a tool if you genuinely cannot answer without one. Read and act "
+                    "on this message first:\n\n" + text
                 )
             elif self._last_run_state == RunState.RUNNING:
                 # send_message only appends to the conversation's event
@@ -2686,7 +2699,7 @@ class MainWindow(QMainWindow):
         """
         if self._host_path_correction_sent_for_run:
             return
-        if tool_name not in ("glob", "grep", "file_editor"):
+        if tool_name not in ("glob", "grep", "file_editor", "terminal"):
             return
         if self._controller is None or self._controller.conversation_id is None:
             return
@@ -3321,6 +3334,18 @@ class MainWindow(QMainWindow):
             # backwards from what the pill is supposed to communicate.
             tool_failed = bool(observation.get("is_error")) or text.startswith("ERROR:")
             if tool_failed:
+                self._correct_host_path_confusion_if_needed(event.tool_name, text)
+            elif event.tool_name == "terminal" and observation.get("exit_code"):
+                # Confirmed live 2026-08-01: a real failed `cd` to a
+                # nonexistent (host) path came back with is_error: false --
+                # only a non-zero exit_code and a "bash: cd: ... No such
+                # file or directory" text revealed it. Checked separately
+                # from tool_failed (not folded into it) so an ordinary
+                # nonzero exit from e.g. `grep` with no match doesn't start
+                # rendering as a red error card -- this only ever feeds the
+                # narrowly-gated host-path check, which requires an actual
+                # host path prefix and "no such file"/"not a valid
+                # directory" text before it does anything.
                 self._correct_host_path_confusion_if_needed(event.tool_name, text)
             # Always resolve the matching tool_call card (even with no
             # extracted text) -- LogView pairs tool_call/tool_result into one

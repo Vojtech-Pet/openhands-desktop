@@ -1985,9 +1985,20 @@ class MainWindow(QMainWindow):
                 # whatever it was doing instead of being just another queued
                 # note to get back to once the old task is done.
                 self._user_interrupted_awaiting_priority = False
+                # Confirmed live 2026-08-01 (in 1.1, same text here): a
+                # short question here (e.g. "aký je problém" / "what's the
+                # problem") got treated as "keep debugging to find the
+                # answer" -- the agent kept calling more tools instead of
+                # just answering from what it already knew. Spelled out
+                # explicitly now: answer from existing context first, only
+                # use a tool if that's genuinely not enough.
                 outgoing_text = (
                     "PRIORITY -- you were just interrupted. Do not resume or continue "
-                    "the previous task. Read and act on this message first:\n\n" + text
+                    "the previous task. If this message is a question you can answer "
+                    "from what you already know/did, answer it directly in plain text "
+                    "-- do not call a tool just to keep investigating first. Only use "
+                    "a tool if you genuinely cannot answer without one. Read and act "
+                    "on this message first:\n\n" + text
                 )
             elif self._last_run_state == RunState.RUNNING:
                 # send_message only appends to the conversation's event
@@ -2553,7 +2564,7 @@ class MainWindow(QMainWindow):
         """
         if self._host_path_correction_sent_for_run:
             return
-        if tool_name not in ("glob", "grep", "file_editor"):
+        if tool_name not in ("glob", "grep", "file_editor", "terminal"):
             return
         if self._controller is None or self._controller.conversation_id is None:
             return
