@@ -36,11 +36,16 @@ RUN mkdir -p /home/openhands/.openhands/agents /home/openhands/.openhands/microa
 # file/p7zip-full(7z)/exiftool cover the same subagent's Windows-binary-
 # analysis section (installer/archive triage) -- confirmed missing
 # alongside requests/yt-dlp/ffmpeg in the same live check.
+# httpx/aiohttp: neither is in the stock OpenHands image either (confirmed
+# against ghcr.io/openhands/agent-server:1.37.1-python directly, not just
+# ours) -- requests only covers sync HTTP, and async code (common in
+# generated Python) needs one of these instead.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ffmpeg file p7zip-full libimage-exiftool-perl \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir --break-system-packages requests beautifulsoup4 yt-dlp
+    && pip install --no-cache-dir --break-system-packages \
+        requests beautifulsoup4 yt-dlp httpx aiohttp
 
 COPY --chown=10001:10001 agents/      /home/openhands/.openhands/agents/
 COPY --chown=10001:10001 microagents/ /home/openhands/.openhands/microagents/
