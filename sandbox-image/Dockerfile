@@ -33,8 +33,12 @@ RUN mkdir -p /home/openhands/.openhands/agents /home/openhands/.openhands/microa
 # 2026-08-01 none of them were actually in the base agent-server image, so
 # every real task hit "ModuleNotFoundError: No module named 'requests'" on
 # its very first HTTP call.
+# file/p7zip-full(7z)/exiftool cover the same subagent's Windows-binary-
+# analysis section (installer/archive triage) -- confirmed missing
+# alongside requests/yt-dlp/ffmpeg in the same live check.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg file p7zip-full libimage-exiftool-perl \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir --break-system-packages requests beautifulsoup4 yt-dlp
 
