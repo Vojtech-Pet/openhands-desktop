@@ -2570,13 +2570,17 @@ class MainWindow(QMainWindow):
         asyncio.ensure_future(self._handle_silence(elapsed))
 
     async def _handle_silence(self, elapsed_s: float) -> None:
+        # kind="system", not "error": this is the app's normal recovery
+        # path working as intended, not a problem for the user to act on --
+        # confirmed live 2026-08-01 it correctly unstuck a real hang on its
+        # own (interrupt, redirect, agent picked back up within seconds).
+        # Styling it as an error every time made a routine self-recovery
+        # look like something had gone wrong.
         self._append_log(
-            f"No response from the model for over {int(elapsed_s)}s while the conversation "
-            "shows as running -- it may have returned an empty response and gotten stuck. "
-            "Interrupting and redirecting.",
-            kind="error",
+            f"No response from the model for over {int(elapsed_s)}s -- nudging it to "
+            "continue.",
+            kind="system",
         )
-        self._notify_needs_attention()
         if self._controller is None or self._controller.conversation_id is None:
             return
         self._controller.interrupt()
