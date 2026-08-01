@@ -386,17 +386,34 @@ class ConversationController(QObject):
             self._status_poll_task.cancel()
         self._status_poll_task = asyncio.ensure_future(self._poll_status())
 
+    # Confirmed live 2026-08-02: under heavy host load (local LLM +
+    # subagent work running at once) app_server's own connection handling
+    # briefly flapped -- fail, succeed, fail, succeed -- for several
+    # seconds. The old one-failure gate re-armed on every intervening
+    # success, so each flap produced its own red "Status check failed"
+    # card (4 in a row for one ~8s blip) even though nothing was actually,
+    # durably down. Requiring a few *consecutive* failures before
+    # surfacing anything filters that noise while still catching a real
+    # sustained outage within ~6s.
+    _STATUS_POLL_FAILURE_THRESHOLD = 3
+
     async def _poll_status(self) -> None:
         assert self.conversation_id is not None
         last_state: RunState | None = None
         try:
             reported_error = False
+            consecutive_failures = 0
             while not self._stopping and self.conversation_id is not None:
                 try:
                     conversation = await self._client.get_conversation(self.conversation_id)
                     reported_error = False
+                    consecutive_failures = 0
                 except Exception as exc:  # noqa: BLE001
-                    if not reported_error:
+                    consecutive_failures += 1
+                    if (
+                        consecutive_failures >= self._STATUS_POLL_FAILURE_THRESHOLD
+                        and not reported_error
+                    ):
                         self.error_occurred.emit(f"Status check failed: {exc}")
                         reported_error = True
                     await asyncio.sleep(STATUS_POLL_INTERVAL_S)
