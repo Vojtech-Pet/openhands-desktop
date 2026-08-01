@@ -370,6 +370,7 @@ class MainWindow(QMainWindow):
         self._auto_nudge_in_flight = False
         self._stuck_prompt_shown_for_run = False
         self._host_path_correction_sent_for_run = False
+        self._silence_recovery_sent_for_run = False
         self._last_run_state: RunState | None = None
         self._last_event_at: datetime | None = None
         self._state_generation = 0
@@ -853,6 +854,7 @@ class MainWindow(QMainWindow):
         self._model_sync_timer.setInterval(15000)
         self._model_sync_timer.timeout.connect(self._check_loaded_model)
         self._model_sync_timer.timeout.connect(self._check_health)
+        self._model_sync_timer.timeout.connect(self._check_conversation_silence)
         self._model_sync_timer.start()
 
         self._duration_timer = QTimer(self)
@@ -1936,6 +1938,7 @@ class MainWindow(QMainWindow):
         self._auto_nudge_count_for_run = 0
         self._stuck_prompt_shown_for_run = False
         self._host_path_correction_sent_for_run = False
+        self._silence_recovery_sent_for_run = False
         if self._controller.conversation_id is None:
             self._remember_user_message(text)
             profile_name = self.model_combo.currentData()
@@ -2535,6 +2538,53 @@ class MainWindow(QMainWindow):
             "retrying it verbatim will fail the same way every time. Use "
             "workspace_connect_folder on that exact host path, then "
             "workspace_list_folder/workspace_read_file to browse it instead."
+        )
+        self._append_log(text, kind="user")
+        self._controller.send_message(text)
+
+    _SILENCE_TIMEOUT_S = 90
+
+    def _check_conversation_silence(self) -> None:
+        """Confirmed live 2026-08-01: an OpenHands SDK response_dispatch
+        warning ("LLM response contained no tool call and no content --
+        sending corrective feedback") was followed by total silence --
+        execution_status stayed "running" forever, LM Studio went idle, and
+        neither the app's own status poll (server genuinely still reports
+        "running", nothing to correct) nor ConversationWatchdog (only ever
+        looks at ActionEvents -- if literally nothing happens, it has
+        nothing to compare and never fires) ever notices. Runs on the same
+        15s timer as the model-sync check; independent of both of those.
+        """
+        if self._silence_recovery_sent_for_run:
+            return
+        if self._controller is None or self._controller.conversation_id is None:
+            return
+        if self._last_run_state != RunState.RUNNING:
+            return
+        if self._last_event_at is None:
+            return
+        elapsed = (datetime.now() - self._last_event_at).total_seconds()
+        if elapsed < self._SILENCE_TIMEOUT_S:
+            return
+        self._silence_recovery_sent_for_run = True
+        asyncio.ensure_future(self._handle_silence(elapsed))
+
+    async def _handle_silence(self, elapsed_s: float) -> None:
+        self._append_log(
+            f"No response from the model for over {int(elapsed_s)}s while the conversation "
+            "shows as running -- it may have returned an empty response and gotten stuck. "
+            "Interrupting and redirecting.",
+            kind="error",
+        )
+        self._notify_needs_attention()
+        if self._controller is None or self._controller.conversation_id is None:
+            return
+        self._controller.interrupt()
+        await asyncio.sleep(1.5)  # see _auto_interrupt_and_nudge's docstring for why this delay matters
+        text = (
+            "Your last response appears to have come back empty (no tool call, no "
+            "text). Please try again: call a tool to make progress, or if you're "
+            "genuinely stuck, call ask_user_question with concrete options."
         )
         self._append_log(text, kind="user")
         self._controller.send_message(text)
