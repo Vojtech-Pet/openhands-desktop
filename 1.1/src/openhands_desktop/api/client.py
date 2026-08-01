@@ -95,6 +95,7 @@ class AppServerClient:
         tools: list[str] | None = None,
         agent_profile: str | None = None,
         system_message_suffix: str | None = None,
+        mcp_config: dict | None = None,
     ) -> AppConversation:
         """Synchronous now, unlike the old app-server: the response IS the
         finished conversation, not a task id to poll (verified live --
@@ -105,6 +106,16 @@ class AppServerClient:
         "project-module-engineer" subagent) is not yet wired up here --
         this app doesn't manage agent-profiles server-side yet, only the
         default inline `agent.llm`/`agent.tools` shape.
+
+        `mcp_config`: unlike the old app-server, a new conversation here
+        does NOT inherit the global /api/settings agent_settings.mcp_config
+        automatically -- confirmed live 2026-08-01, a conversation started
+        right after registering this app's ask-user/workspace-bridge MCP
+        servers in global settings still came back with agent.mcp_config
+        == {} and neither tool available, sending a real conversation into
+        a host-path-confusion loop with no way to actually connect the
+        folder it needed. Callers must pass the current mcp_config
+        explicitly per conversation.
         """
         agent: dict = {
             "llm": {
@@ -120,6 +131,8 @@ class AppServerClient:
             agent["llm"]["api_key"] = llm_api_key
         if system_message_suffix:
             agent["system_prompt_kwargs"] = {"system_message_suffix": system_message_suffix}
+        if mcp_config:
+            agent["mcp_config"] = mcp_config
         payload: dict = {
             "workspace": {"working_dir": DEFAULT_WORKSPACE_PATH, "kind": "LocalWorkspace"},
             "agent": agent,

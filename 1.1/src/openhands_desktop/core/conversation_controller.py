@@ -68,6 +68,7 @@ class ConversationController(QObject):
         llm_api_key: str | None = None,
         initial_message: str | None = None,
         system_message_suffix: str | None = None,
+        mcp_config: dict | None = None,
     ) -> None:
         if self._lifecycle_task is not None and not self._lifecycle_task.done():
             self.error_occurred.emit("A conversation is already being started")
@@ -81,6 +82,7 @@ class ConversationController(QObject):
                 llm_api_key=llm_api_key,
                 initial_message=initial_message,
                 system_message_suffix=system_message_suffix,
+                mcp_config=mcp_config,
             ),
             on_done=lambda: self.starting_changed.emit(False),
         )
@@ -93,6 +95,7 @@ class ConversationController(QObject):
         llm_api_key: str | None,
         initial_message: str | None,
         system_message_suffix: str | None,
+        mcp_config: dict | None = None,
     ) -> None:
         try:
             self._completion.reset_for_new_run()
@@ -102,6 +105,7 @@ class ConversationController(QObject):
                 llm_api_key=llm_api_key,
                 initial_message_text=initial_message,
                 system_message_suffix=system_message_suffix,
+                mcp_config=mcp_config,
             )
             self.conversation_id = conversation.id
             await self._connect_and_sync(conversation)

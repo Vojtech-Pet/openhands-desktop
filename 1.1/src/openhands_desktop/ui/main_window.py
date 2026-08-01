@@ -2175,6 +2175,7 @@ class MainWindow(QMainWindow):
             llm_api_key="not-needed",
             initial_message=text,
             system_message_suffix=self._custom_instructions(agent_type),
+            mcp_config=self._current_mcp_config(),
         )
 
     async def _classify_plan_or_code(self, text: str, profile_name: str | None) -> str:
@@ -2892,6 +2893,7 @@ class MainWindow(QMainWindow):
             llm_api_key="not-needed",
             initial_message=self._continue_as_code_initial_message(),
             system_message_suffix=self._custom_instructions("default", continued_from_plan=True),
+            mcp_config=self._current_mcp_config(),
         )
 
     def _continue_as_code_initial_message(self) -> str:
@@ -2948,6 +2950,33 @@ class MainWindow(QMainWindow):
             await self._start_ask_user_server()
             await self._start_workspace_server()
         await self._load_custom_instructions()
+
+    def _current_mcp_config(self) -> dict:
+        """Built directly from this app's own already-running local MCP
+        servers, not fetched from /api/settings -- unlike the old app-
+        server, a new conversation here does NOT inherit the global
+        mcp_config automatically (confirmed live 2026-08-01: a real
+        conversation came back with agent.mcp_config == {} despite both
+        servers being correctly registered in global settings), so every
+        start_new() call must pass this explicitly. Same url/transport/
+        timeout shapes as _register_ask_user_mcp/_register_workspace_mcp.
+        """
+        config: dict = {}
+        if self._ask_user_server is not None:
+            config[_ASK_USER_MCP_NAME] = {
+                "url": self._ask_user_server.mcp_url,
+                "transport": "streamable-http",
+                "timeout": _ASK_USER_TIMEOUT_S,
+                "sse_read_timeout": _ASK_USER_TIMEOUT_S,
+            }
+        if self._workspace_server is not None:
+            config[_WORKSPACE_MCP_NAME] = {
+                "url": self._workspace_server.mcp_url,
+                "transport": "streamable-http",
+                "timeout": 60,
+                "sse_read_timeout": 60,
+            }
+        return config
 
     async def _start_ask_user_server(self) -> None:
         """Hosts the ask_user_question MCP tool and registers it with the
