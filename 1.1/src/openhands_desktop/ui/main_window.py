@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QModelIndex, QSize, QSettings, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QIcon, QKeyEvent, QMouseEvent, QPainter, QTextCursor
+from PySide6.QtGui import QDesktopServices, QKeyEvent, QMouseEvent, QPainter, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -164,13 +164,6 @@ _CONDENSER_MAX_TOKENS = 150000
 _ASK_USER_MCP_NAME = "openhands-desktop-ask-user"
 _ASK_USER_TIMEOUT_S = 900
 _WORKSPACE_MCP_NAME = "openhands-desktop-workspace"
-_TOGGLE_OFF_ICON = QIcon(
-    "/home/vojtech/Dokumenty/openhands_settings_svg_kit/components/toggle-off.svg"
-)
-_TOGGLE_ON_ICON = QIcon(
-    "/home/vojtech/Dokumenty/openhands_settings_svg_kit/components/toggle-on.svg"
-)
-
 # See MainWindow._on_state_changed: caps automatic interrupt+nudge attempts
 # per run so a genuinely broken model loop still surfaces the manual button
 # instead of nudging forever. Set to 1 (2026-07-30, user request): give the
@@ -569,17 +562,16 @@ class MainWindow(QMainWindow):
         top_bar_layout.addWidget(self.model_chip)
 
         self.thinking_chip = QWidget()
-        thinking_chip_layout = QVBoxLayout(self.thinking_chip)
+        self.thinking_chip.setObjectName("TopbarToggleGroup")
+        thinking_chip_layout = QHBoxLayout(self.thinking_chip)
         thinking_chip_layout.setContentsMargins(0, 0, 0, 0)
-        thinking_chip_layout.setSpacing(1)
-        thinking_label = QLabel("Think")
-        thinking_label.setObjectName("ChipCaption")
-        thinking_chip_layout.addWidget(thinking_label, 0, Qt.AlignmentFlag.AlignHCenter)
+        thinking_chip_layout.setSpacing(0)
         self.enable_thinking_check = QPushButton()
         self.enable_thinking_check.setCheckable(True)
-        self.enable_thinking_check.setFixedSize(28, 16)
-        self.enable_thinking_check.setIconSize(QSize(28, 16))
-        self.enable_thinking_check.setObjectName("ComposerToolButton")
+        self.enable_thinking_check.setText("Think")
+        self.enable_thinking_check.setFixedHeight(28)
+        self.enable_thinking_check.setMinimumWidth(62)
+        self.enable_thinking_check.setObjectName("TopbarToggleButton")
         self.enable_thinking_check.setToolTip(
             "Thinking: enable model reasoning for the selected LLM profile. "
             "Applies to the next new conversation."
@@ -589,17 +581,16 @@ class MainWindow(QMainWindow):
         top_bar_layout.addWidget(self.thinking_chip)
 
         self.keep_chip = QWidget()
-        keep_chip_layout = QVBoxLayout(self.keep_chip)
+        self.keep_chip.setObjectName("TopbarToggleGroup")
+        keep_chip_layout = QHBoxLayout(self.keep_chip)
         keep_chip_layout.setContentsMargins(0, 0, 0, 0)
-        keep_chip_layout.setSpacing(1)
-        keep_label = QLabel("Keep")
-        keep_label.setObjectName("ChipCaption")
-        keep_chip_layout.addWidget(keep_label, 0, Qt.AlignmentFlag.AlignHCenter)
+        keep_chip_layout.setSpacing(0)
         self.preserve_thinking_check = QPushButton()
         self.preserve_thinking_check.setCheckable(True)
-        self.preserve_thinking_check.setFixedSize(28, 16)
-        self.preserve_thinking_check.setIconSize(QSize(28, 16))
-        self.preserve_thinking_check.setObjectName("ComposerToolButton")
+        self.preserve_thinking_check.setText("Keep")
+        self.preserve_thinking_check.setFixedHeight(28)
+        self.preserve_thinking_check.setMinimumWidth(58)
+        self.preserve_thinking_check.setObjectName("TopbarToggleButton")
         self.preserve_thinking_check.setToolTip(
             "Keep thinking: preserve previous thinking blocks across turns for the selected LLM profile. "
             "Applies to the next new conversation."
@@ -640,6 +631,7 @@ class MainWindow(QMainWindow):
 
         self.tasks_btn = QPushButton("Tasks")
         self.tasks_btn.setIcon(icon("plan-tasks"))
+        self.tasks_btn.setObjectName("TopbarMoreButton")
         self.tasks_btn.setToolTip("Mission Control -- every conversation on this server, live")
         self.tasks_btn.clicked.connect(self._open_task_board)
         top_bar_layout.addWidget(self.tasks_btn)
@@ -691,8 +683,6 @@ class MainWindow(QMainWindow):
             self.browser_preview_btn,
             self.changes_btn,
             self.history_btn,
-            self.thinking_chip,
-            self.keep_chip,
             self.unload_model_btn,
             self.workspace_chip,
             self.health_chip,
@@ -1518,13 +1508,13 @@ class MainWindow(QMainWindow):
         think_action = menu.addAction("Thinking")
         think_action.setCheckable(True)
         think_action.setChecked(self.enable_thinking_check.isChecked())
-        think_action.setEnabled(self.enable_thinking_check.isEnabled())
+        think_action.setEnabled(True)
         think_action.toggled.connect(self.enable_thinking_check.setChecked)
 
         keep_action = menu.addAction("Keep thinking")
         keep_action.setCheckable(True)
         keep_action.setChecked(self.preserve_thinking_check.isChecked())
-        keep_action.setEnabled(self.preserve_thinking_check.isEnabled())
+        keep_action.setEnabled(True)
         keep_action.toggled.connect(self.preserve_thinking_check.setChecked)
 
         menu.addSeparator()
@@ -1650,11 +1640,21 @@ class MainWindow(QMainWindow):
     def _refresh_thinking_toggles(self) -> None:
         name = self.model_combo.currentData()
         if not name:
-            self.enable_thinking_check.setEnabled(False)
-            self.preserve_thinking_check.setEnabled(False)
+            self.enable_thinking_check.setEnabled(True)
+            self.preserve_thinking_check.setEnabled(True)
+            self.enable_thinking_check.setToolTip("Thinking preference is staged until a model profile is selected.")
+            self.preserve_thinking_check.setToolTip("Keep-thinking preference is staged until a model profile is selected.")
             return
-        self.enable_thinking_check.setEnabled(False)
-        self.preserve_thinking_check.setEnabled(False)
+        self.enable_thinking_check.setEnabled(True)
+        self.preserve_thinking_check.setEnabled(True)
+        self.enable_thinking_check.setToolTip(
+            "Thinking: enable model reasoning for the selected LLM profile. "
+            "Applies to the next new conversation."
+        )
+        self.preserve_thinking_check.setToolTip(
+            "Keep thinking: preserve previous thinking blocks across turns for the selected LLM profile. "
+            "Applies to the next new conversation."
+        )
         asyncio.ensure_future(self._refresh_thinking_toggles_async(name))
 
     async def _refresh_thinking_toggles_async(self, profile_name: str) -> None:
@@ -1689,8 +1689,6 @@ class MainWindow(QMainWindow):
         name = self.model_combo.currentData()
         if not name:
             return
-        self.enable_thinking_check.setEnabled(False)
-        self.preserve_thinking_check.setEnabled(False)
         asyncio.ensure_future(
             self._save_thinking_toggles_async(
                 name,
@@ -1756,12 +1754,8 @@ class MainWindow(QMainWindow):
         self._append_log("Applied the Thinking/Keep setting to the running conversation.", kind="system")
 
     def _update_thinking_toggle_icons(self) -> None:
-        self.enable_thinking_check.setIcon(
-            _TOGGLE_ON_ICON if self.enable_thinking_check.isChecked() else _TOGGLE_OFF_ICON
-        )
-        self.preserve_thinking_check.setIcon(
-            _TOGGLE_ON_ICON if self.preserve_thinking_check.isChecked() else _TOGGLE_OFF_ICON
-        )
+        _repolish(self.enable_thinking_check)
+        _repolish(self.preserve_thinking_check)
 
     def _update_model_status_label(self) -> None:
         model = self._selected_model()
@@ -3449,31 +3443,35 @@ class MainWindow(QMainWindow):
             return
         width = self.top_bar.width()
 
+        # Keep the top bar predictable: primary controls stay visible,
+        # secondary actions live in the More menu.
         for widget in (
             self.supervised_agent_btn,
-            self.tasks_btn,
             self.errors_btn,
             self.browser_preview_btn,
             self.changes_btn,
             self.history_btn,
             self.unload_model_btn,
-            self.thinking_chip,
-            self.keep_chip,
         ):
             widget.setVisible(False)
 
-        self.health_chip.setVisible(width >= 520)
-        self.workspace_chip.setVisible(width >= 620)
-        self.topbar_status_widget.setVisible(width >= 900)
+        self.health_chip.setVisible(True)
+        self.workspace_chip.setVisible(True)
+        self.thinking_chip.setVisible(True)
+        self.keep_chip.setVisible(True)
+        self.tasks_btn.setVisible(True)
+        self.topbar_status_widget.setVisible(False)
+        self.topbar_menu_btn.setVisible(True)
+        self.panel_toggle_btn.setVisible(True)
 
-        compact_model = width < 980
+        compact_model = width < 900
         self.model_chip.setMinimumWidth(118 if compact_model else 210)
         self.model_chip.setMaximumWidth(180 if compact_model else 300)
         self.model_combo.setMinimumWidth(54 if compact_model else 112)
         self.model_combo.setMinimumContentsLength(6 if compact_model else 18)
         self.model_caption.setVisible(not compact_model)
 
-        compact_left = width < 980
+        compact_left = width < 900
         self.health_label.setText(self._health_full_text.replace("Health: ", "") if compact_left else self._health_full_text)
         self.workspace_value_label.setText("Workspace" if compact_left else self._workspace_full_text)
         self.health_chip.setMinimumWidth(62 if compact_left else 0)

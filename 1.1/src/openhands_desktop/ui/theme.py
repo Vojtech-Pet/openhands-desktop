@@ -115,6 +115,29 @@ QWidget {{
     border-color: {BORDER_HOVER};
 }}
 
+#TopbarToggleGroup {{
+    background-color: transparent;
+}}
+
+#TopbarToggleButton {{
+    background-color: {BG_SURFACE_2};
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS_SM}px;
+    padding: 4px 8px;
+    color: {TEXT_SECONDARY};
+    font-size: 12px;
+    font-weight: 600;
+}}
+#TopbarToggleButton:hover {{
+    border-color: {BORDER_HOVER};
+    color: {TEXT_PRIMARY};
+}}
+#TopbarToggleButton:checked {{
+    background-color: rgba(59, 130, 246, 0.18);
+    border-color: {COLOR_PRIMARY};
+    color: {TEXT_PRIMARY};
+}}
+
 #StatusBarWidget {{
     background-color: {BG_SURFACE_1};
     border-top: 1px solid {BORDER};
