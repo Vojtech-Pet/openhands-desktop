@@ -10,10 +10,10 @@ set -euo pipefail
 
 REPO="openhands-desktop/agent-server"
 TAG="1.40.0-python"
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 echo "==> building ${REPO}:${TAG}"
-docker build -t "${REPO}:${TAG}" .
+docker build -f sandbox-image/Dockerfile -t "${REPO}:${TAG}" .
 
 echo
 echo "==> testing DNS inside ${REPO}:${TAG}"

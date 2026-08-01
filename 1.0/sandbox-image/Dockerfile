@@ -15,6 +15,11 @@
 #
 # Build and point the app-server at it:
 #   ./build.sh
+#
+# Build context is the app root (one level up from this file, see
+# build.sh), not this directory -- subagent definitions live in
+# src/openhands_desktop/resources/agents/ (part of the Python package,
+# not sandbox-image-only) so COPY below can reach them.
 FROM ghcr.io/openhands/agent-server:1.40.0-python
 
 # Create ~/.openhands owned by the runtime user BEFORE copying into it.
@@ -47,7 +52,7 @@ RUN apt-get update \
     && pip install --no-cache-dir --break-system-packages \
         requests beautifulsoup4 yt-dlp httpx aiohttp
 
-COPY --chown=10001:10001 agents/      /home/openhands/.openhands/agents/
-COPY --chown=10001:10001 microagents/ /home/openhands/.openhands/microagents/
+COPY --chown=10001:10001 src/openhands_desktop/resources/agents/ /home/openhands/.openhands/agents/
+COPY --chown=10001:10001 sandbox-image/microagents/               /home/openhands/.openhands/microagents/
 
 USER 10001

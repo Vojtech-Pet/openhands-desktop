@@ -10,8 +10,10 @@ wheels/
 .venv
 
 # Private local-only agent definitions (real project name/paths inside --
-# never tracked, present under both 1.0/ and 1.1/)
-**/sandbox-image/agents/project-module-engineer.md
-**/sandbox-image/agents/windows-binary-analysis-agent.md
+# never tracked, present under both 1.0/ and 1.1/). Moved from
+# sandbox-image/agents/ to src/openhands_desktop/resources/agents/ 2026-08-01
+# (part of the Python package now, not sandbox-image-only).
+**/src/openhands_desktop/resources/agents/project-module-engineer.md
+**/src/openhands_desktop/resources/agents/windows-binary-analysis-agent.md
 **/sandbox-image/microagents/project-subagent-routing.md
 **/sandbox-image/reference/
