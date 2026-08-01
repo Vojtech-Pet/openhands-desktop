@@ -528,6 +528,8 @@ class MainWindow(QMainWindow):
         model_chip = QWidget()
         model_chip.setObjectName("TopBarChip")
         model_chip.setFixedHeight(TOOLBAR_CONTROL_HEIGHT)
+        model_chip.setMinimumWidth(260)
+        model_chip.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         model_chip_row = QHBoxLayout(model_chip)
         model_chip_row.setContentsMargins(SPACE_SM, 4, SPACE_XS, 4)
         model_chip_row.setSpacing(SPACE_XS)
@@ -542,7 +544,14 @@ class MainWindow(QMainWindow):
         self.model_combo = QComboBox()
         self.model_combo.setObjectName("ChipValue")
         self.model_combo.setFrame(False)
-        self.model_combo.setStyleSheet("QComboBox#ChipValue { background: transparent; border: none; padding: 0px; }")
+        self.model_combo.setMinimumWidth(150)
+        self.model_combo.view().setMinimumWidth(360)
+        self.model_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.model_combo.setMinimumContentsLength(18)
+        self.model_combo.setStyleSheet(
+            "QComboBox#ChipValue { background: transparent; border: none; padding: 0px; }"
+            "QComboBox#ChipValue QAbstractItemView { min-width: 360px; }"
+        )
         self.model_combo.setToolTip("LLM profile used for the next new conversation")
         self.model_combo.setItemDelegate(_CurrentSelectionDelegate(self.model_combo))
         self.model_combo.currentIndexChanged.connect(self._on_model_selection_changed)
