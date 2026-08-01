@@ -14,3 +14,7 @@ Upstream OpenHands underwent an "Agent Canvas migration" (July 2026) that delete
 `1.0` is pinned to the last SDK release line that still ships `app_server` and keeps working exactly as before. `1.1` is a from-scratch rewrite of the API/controller layer targeting the new architecture directly -- see [1.1/MIGRATION_STATUS.md](1.1/MIGRATION_STATUS.md) for exactly what's been verified live and what's still in progress.
 
 Each directory is a complete, independent app (its own `pyproject.toml`, `src/`, `sandbox-image/`) -- run either one from inside its own directory.
+
+## LLM support
+
+Only tested and used against a **local** LLM server (LM Studio) so far. Cloud providers (OpenAI, Anthropic, etc) aren't wired up or verified yet in either version -- profile/API-key handling currently assumes a local server that doesn't validate the key at all.
