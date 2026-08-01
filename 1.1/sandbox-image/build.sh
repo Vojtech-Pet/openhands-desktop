@@ -9,7 +9,7 @@
 set -euo pipefail
 
 REPO="openhands-desktop/agent-server"
-TAG="1.37.1-python"
+TAG="1.40.0-python"
 cd "$(dirname "$0")"
 
 echo "==> building ${REPO}:${TAG}"
