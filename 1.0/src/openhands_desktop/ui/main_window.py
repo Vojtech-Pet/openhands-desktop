@@ -379,6 +379,12 @@ class MainWindow(QMainWindow):
         # after a Stop click wraps the user's text with an explicit
         # priority instruction instead of sending it verbatim.
         self._user_interrupted_awaiting_priority = False
+        # See the priority-message block in _send(): whether the very next
+        # agent action after a priority-wrapped message was a tool call
+        # (meaning it ignored the "answer directly" instruction) rather
+        # than a real text answer.
+        self._priority_enforcement_pending = False
+        self._priority_enforcement_sent = False
         self._last_run_state: RunState | None = None
         self._last_event_at: datetime | None = None
         self._state_generation = 0
@@ -1952,6 +1958,8 @@ class MainWindow(QMainWindow):
         self._silence_recovery_sent_for_run = False
         if self._controller.conversation_id is None:
             self._user_interrupted_awaiting_priority = False
+            self._priority_enforcement_pending = False
+            self._priority_enforcement_sent = False
             self._remember_user_message(text)
             profile_name = self.model_combo.currentData()
             model = self._selected_model()
@@ -2003,6 +2011,16 @@ class MainWindow(QMainWindow):
                     "a tool if you genuinely cannot answer without one. Read and act "
                     "on this message first:\n\n" + text
                 )
+                # Enforcement layer for when the wording above still isn't
+                # enough (confirmed live 2026-08-01 in 1.1: a real local
+                # model was asked "ako to ide?" with this exact wording and
+                # still called a tool -- curl -- instead of answering).
+                # Watched in _render_event: the agent's very next action
+                # after this message decides whether this escalates to a
+                # stronger, one-shot forced follow-up, or clears quietly
+                # once a real text answer arrives instead.
+                self._priority_enforcement_pending = True
+                self._priority_enforcement_sent = False
             elif self._last_run_state == RunState.RUNNING:
                 # send_message only appends to the conversation's event
                 # history -- it does NOT interrupt whatever LLM call is
@@ -2645,6 +2663,27 @@ class MainWindow(QMainWindow):
         self._append_log(text, kind="system")
         self._controller.send_message(text)
 
+    async def _send_forced_priority_followup(self) -> None:
+        """One-shot enforcement for when the priority-message wording alone
+        isn't enough (confirmed live 2026-08-01: a real local model was
+        asked a plain question right after Stop and still called a tool --
+        curl -- instead of answering it directly). Fires exactly once per
+        priority message (see _priority_enforcement_sent) so a model that
+        still won't comply doesn't get stuck in an interrupt/retry loop --
+        it falls through to whatever it does next after this."""
+        if self._controller is None or self._controller.conversation_id is None:
+            return
+        self._controller.interrupt()
+        await asyncio.sleep(1.5)  # see _auto_interrupt_and_nudge's docstring for why this delay matters
+        text = (
+            "STOP. You just called a tool instead of answering the priority "
+            "question directly -- that instruction was not optional. Do not "
+            "call any more tools. Write your answer as plain text right now, "
+            "based only on what you already know."
+        )
+        self._append_log(text, kind="system")
+        self._controller.send_message(text)
+
     async def _handle_stuck(self, reason: str) -> None:
         """Runs after ConversationWatchdog gives up. Confirmed live
         2026-07-31: asking the user to decide *immediately* sometimes raced
@@ -3117,6 +3156,15 @@ class MainWindow(QMainWindow):
             # not exact, but real signal where the server gives none.
             self._estimated_context_chars += len(json.dumps(event.raw, default=str))
             self._update_tool_call_label()
+        if event.kind == EventKind.ACTION and self._priority_enforcement_pending:
+            self._priority_enforcement_pending = False
+            if (
+                not self._priority_enforcement_sent
+                and event.tool_name != "ask_user_question"
+                and self._controller is not None
+            ):
+                self._priority_enforcement_sent = True
+                asyncio.ensure_future(self._send_forced_priority_followup())
         if event.kind == EventKind.ACTION:
             finish_message = None
             if event.tool_name == "finish":
@@ -3187,6 +3235,11 @@ class MainWindow(QMainWindow):
                 if self._is_resuming:
                     self._append_log(visible_text, kind="user", timestamp=event.timestamp)
             if event.source == "agent" and event.text:
+                # A real text answer right after a priority message means
+                # it complied -- clear the pending flag without escalating
+                # (only an ACTION event, handled above, triggers the forced
+                # follow-up).
+                self._priority_enforcement_pending = False
                 self._append_log(event.text, kind="agent", timestamp=event.timestamp)
                 self._flash_if_unfocused()
         elif event.kind == EventKind.AGENT_ERROR:
