@@ -2,6 +2,10 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-08-01 — Sandbox image now also has httpx/aiohttp (async HTTP)
+
+- `requests` only covers sync HTTP; async Python code needs `httpx` or `aiohttp` instead, and neither ships in the stock OpenHands image (verified directly against `ghcr.io/openhands/agent-server:1.37.1-python`, not just ours). Both are now installed.
+
 ## 2026-08-01 — Sandbox image now has requests/beautifulsoup4/yt-dlp/ffmpeg/file/7z/exiftool + self-install fallback
 
 - The project-module-engineer subagent's own playbook assumes several tools are available, but none of them were actually in the base agent-server image -- every real task hit `ModuleNotFoundError: No module named 'requests'` on its first HTTP call. Verified directly against the freshly built image that all seven are now present. Only affects new conversations (new sandbox containers) -- any already-running conversation is still on the old image until it's restarted.
