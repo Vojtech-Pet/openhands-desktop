@@ -56,11 +56,11 @@ QWidget {{
 
 #ChipCaption {{
     color: {TEXT_SECONDARY};
-    font-size: 11px;
+    font-size: 9px;
 }}
 #ChipValue {{
     color: {TEXT_PRIMARY};
-    font-size: 15px;
+    font-size: 13px;
 }}
 
 #MenuButton {{
@@ -364,7 +364,7 @@ QPushButton {{
     background-color: {BG_SURFACE_2};
     border: 1px solid {BORDER};
     border-radius: {RADIUS_SM}px;
-    padding: 8px 14px;
+    padding: 4px 8px;
     color: {TEXT_PRIMARY};
 }}
 QPushButton:hover {{

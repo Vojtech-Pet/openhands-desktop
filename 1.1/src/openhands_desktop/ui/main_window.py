@@ -484,12 +484,12 @@ class MainWindow(QMainWindow):
         self._restore_splitter_state()
 
         # --- top bar ---
-        top_bar = QWidget()
-        top_bar.setObjectName("TopBar")
-        top_bar.setFixedHeight(TOOLBAR_HEIGHT)
-        top_bar_layout = QHBoxLayout(top_bar)
-        top_bar_layout.setContentsMargins(SPACE_MD, SPACE_SM, SPACE_MD, SPACE_SM)
-        top_bar_layout.setSpacing(SPACE_SM)
+        self.top_bar = QWidget()
+        self.top_bar.setObjectName("TopBar")
+        self.top_bar.setFixedHeight(TOOLBAR_HEIGHT)
+        top_bar_layout = QHBoxLayout(self.top_bar)
+        top_bar_layout.setContentsMargins(SPACE_SM, SPACE_XS, SPACE_SM, SPACE_XS)
+        top_bar_layout.setSpacing(SPACE_XS)
 
         # Menu + logo live in the sidebar itself (top-left of the whole
         # window, per the target mockup) -- not repeated here.
@@ -497,10 +497,10 @@ class MainWindow(QMainWindow):
         # Health chip
         self.health_icon_label = QLabel()
         self.health_icon_label.setPixmap(icon("health", 14, COLOR_NEUTRAL).pixmap(14, 14))
-        self.health_label = QLabel("Health: unknown")
-        top_bar_layout.addWidget(
-            self._simple_chip([self.health_icon_label, self.health_label])
-        )
+        self._health_full_text = "Health: unknown"
+        self.health_label = QLabel(self._health_full_text)
+        self.health_chip = self._simple_chip([self.health_icon_label, self.health_label])
+        top_bar_layout.addWidget(self.health_chip)
 
         # Workspace chip (two-line caption/value, per the design spec) --
         # clicking it runs the permission preflight, it does NOT select a
@@ -516,7 +516,8 @@ class MainWindow(QMainWindow):
             "server mounts -- OpenHands' API has no per-conversation workspace "
             "selection today (see local-findings/issue-07)."
         )
-        self.workspace_value_label = QLabel("Check permissions…")
+        self._workspace_full_text = "Check permissions…"
+        self.workspace_value_label = QLabel(self._workspace_full_text)
         self._fill_two_line_chip(
             self.workspace_chip, "workspace", "Workspace", self.workspace_value_label
         )
@@ -525,26 +526,26 @@ class MainWindow(QMainWindow):
 
         # Model chip: caption + a real QComboBox styled borderless as the
         # "value" line (this one IS a functional selector, unlike Workspace).
-        model_chip = QWidget()
-        model_chip.setObjectName("TopBarChip")
-        model_chip.setFixedHeight(TOOLBAR_CONTROL_HEIGHT)
-        model_chip.setMinimumWidth(260)
-        model_chip.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        model_chip_row = QHBoxLayout(model_chip)
-        model_chip_row.setContentsMargins(SPACE_SM, 4, SPACE_XS, 4)
+        self.model_chip = QWidget()
+        self.model_chip.setObjectName("TopBarChip")
+        self.model_chip.setFixedHeight(TOOLBAR_CONTROL_HEIGHT)
+        self.model_chip.setMinimumWidth(210)
+        self.model_chip.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        model_chip_row = QHBoxLayout(self.model_chip)
+        model_chip_row.setContentsMargins(SPACE_XS, 3, SPACE_XS, 3)
         model_chip_row.setSpacing(SPACE_XS)
         model_icon_label = QLabel()
         model_icon_label.setPixmap(icon("model-ai", 18).pixmap(18, 18))
         model_chip_row.addWidget(model_icon_label)
         model_text_col = QVBoxLayout()
         model_text_col.setSpacing(0)
-        model_caption = QLabel("Model")
-        model_caption.setObjectName("ChipCaption")
-        model_text_col.addWidget(model_caption)
+        self.model_caption = QLabel("Model")
+        self.model_caption.setObjectName("ChipCaption")
+        model_text_col.addWidget(self.model_caption)
         self.model_combo = QComboBox()
         self.model_combo.setObjectName("ChipValue")
         self.model_combo.setFrame(False)
-        self.model_combo.setMinimumWidth(150)
+        self.model_combo.setMinimumWidth(112)
         self.model_combo.view().setMinimumWidth(360)
         self.model_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.model_combo.setMinimumContentsLength(18)
@@ -565,10 +566,10 @@ class MainWindow(QMainWindow):
         self.unload_model_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.unload_model_btn.clicked.connect(self._on_unload_model_clicked)
         model_chip_row.addWidget(self.unload_model_btn)
-        top_bar_layout.addWidget(model_chip)
+        top_bar_layout.addWidget(self.model_chip)
 
-        thinking_chip = QWidget()
-        thinking_chip_layout = QVBoxLayout(thinking_chip)
+        self.thinking_chip = QWidget()
+        thinking_chip_layout = QVBoxLayout(self.thinking_chip)
         thinking_chip_layout.setContentsMargins(0, 0, 0, 0)
         thinking_chip_layout.setSpacing(1)
         thinking_label = QLabel("Think")
@@ -576,8 +577,8 @@ class MainWindow(QMainWindow):
         thinking_chip_layout.addWidget(thinking_label, 0, Qt.AlignmentFlag.AlignHCenter)
         self.enable_thinking_check = QPushButton()
         self.enable_thinking_check.setCheckable(True)
-        self.enable_thinking_check.setFixedSize(38, 22)
-        self.enable_thinking_check.setIconSize(QSize(38, 22))
+        self.enable_thinking_check.setFixedSize(28, 16)
+        self.enable_thinking_check.setIconSize(QSize(28, 16))
         self.enable_thinking_check.setObjectName("ComposerToolButton")
         self.enable_thinking_check.setToolTip(
             "Thinking: enable model reasoning for the selected LLM profile. "
@@ -585,10 +586,10 @@ class MainWindow(QMainWindow):
         )
         self.enable_thinking_check.toggled.connect(self._on_thinking_toggle_changed)
         thinking_chip_layout.addWidget(self.enable_thinking_check)
-        top_bar_layout.addWidget(thinking_chip)
+        top_bar_layout.addWidget(self.thinking_chip)
 
-        keep_chip = QWidget()
-        keep_chip_layout = QVBoxLayout(keep_chip)
+        self.keep_chip = QWidget()
+        keep_chip_layout = QVBoxLayout(self.keep_chip)
         keep_chip_layout.setContentsMargins(0, 0, 0, 0)
         keep_chip_layout.setSpacing(1)
         keep_label = QLabel("Keep")
@@ -596,8 +597,8 @@ class MainWindow(QMainWindow):
         keep_chip_layout.addWidget(keep_label, 0, Qt.AlignmentFlag.AlignHCenter)
         self.preserve_thinking_check = QPushButton()
         self.preserve_thinking_check.setCheckable(True)
-        self.preserve_thinking_check.setFixedSize(38, 22)
-        self.preserve_thinking_check.setIconSize(QSize(38, 22))
+        self.preserve_thinking_check.setFixedSize(28, 16)
+        self.preserve_thinking_check.setIconSize(QSize(28, 16))
         self.preserve_thinking_check.setObjectName("ComposerToolButton")
         self.preserve_thinking_check.setToolTip(
             "Keep thinking: preserve previous thinking blocks across turns for the selected LLM profile. "
@@ -605,7 +606,7 @@ class MainWindow(QMainWindow):
         )
         self.preserve_thinking_check.toggled.connect(self._on_thinking_toggle_changed)
         keep_chip_layout.addWidget(self.preserve_thinking_check)
-        top_bar_layout.addWidget(keep_chip)
+        top_bar_layout.addWidget(self.keep_chip)
         self._update_thinking_toggle_icons()
 
         self.history_btn = QPushButton("History")
@@ -621,6 +622,7 @@ class MainWindow(QMainWindow):
         top_bar_layout.addWidget(self.changes_btn)
 
         self.browser_preview_btn = QPushButton("Browser")
+        self.browser_preview_btn.setIcon(icon("browser"))
         self.browser_preview_btn.setToolTip(
             "Open a live view of the sandbox's browser (noVNC) in your system browser -- "
             "shows what browser_navigate/browser_get_state are actually doing"
@@ -630,6 +632,7 @@ class MainWindow(QMainWindow):
         top_bar_layout.addWidget(self.browser_preview_btn)
 
         self.errors_btn = QPushButton("Errors")
+        self.errors_btn.setIcon(icon("error"))
         self.errors_btn.setToolTip("Every error in this conversation, collected in one place")
         self.errors_btn.setEnabled(False)
         self.errors_btn.clicked.connect(self._open_errors_dialog)
@@ -652,7 +655,9 @@ class MainWindow(QMainWindow):
 
         top_bar_layout.addStretch()
 
-        status_col = QVBoxLayout()
+        self.topbar_status_widget = QWidget()
+        status_col = QVBoxLayout(self.topbar_status_widget)
+        status_col.setContentsMargins(0, 0, 0, 0)
         status_col.setSpacing(0)
         status_top_row = QHBoxLayout()
         status_top_row.setSpacing(SPACE_XS)
@@ -665,13 +670,32 @@ class MainWindow(QMainWindow):
         self.overall_status_sublabel = QLabel("")
         self.overall_status_sublabel.setObjectName("ChipCaption")
         status_col.addWidget(self.overall_status_sublabel)
-        top_bar_layout.addLayout(status_col)
+        top_bar_layout.addWidget(self.topbar_status_widget)
 
         self.panel_toggle_btn = panel_toggle_button()
         self.panel_toggle_btn.toggled.connect(self.right_panel.setVisible)
         top_bar_layout.addWidget(self.panel_toggle_btn)
+        self._topbar_optional_widgets = (
+            self.supervised_agent_btn,
+            self.tasks_btn,
+            self.errors_btn,
+            self.browser_preview_btn,
+            self.changes_btn,
+            self.history_btn,
+            self.workspace_chip,
+            self.health_chip,
+        )
+        self._topbar_action_labels = {
+            self.history_btn: "History",
+            self.changes_btn: "Changes",
+            self.browser_preview_btn: "Browser",
+            self.errors_btn: "Errors",
+            self.tasks_btn: "Tasks",
+            self.supervised_agent_btn: "Supervised Agent",
+        }
+        QTimer.singleShot(0, self._update_topbar_compact)
 
-        main_layout.addWidget(top_bar)
+        main_layout.addWidget(self.top_bar)
 
         self.content_splitter = QSplitter(Qt.Orientation.Vertical)
         self.content_splitter.setObjectName("ContentSplitter")
@@ -1844,7 +1868,8 @@ class MainWindow(QMainWindow):
 
     async def _check_health_async(self) -> None:
         ok = await self._client.health()
-        self.health_label.setText(f"Health: {'OK' if ok else 'unreachable'}")
+        self._health_full_text = f"Health: {'OK' if ok else 'unreachable'}"
+        self.health_label.setText(self._health_full_text)
         self.health_label.setObjectName("HealthOk" if ok else "HealthBad")
         _repolish(self.health_label)
         self.health_icon_label.setPixmap(
@@ -1945,9 +1970,8 @@ class MainWindow(QMainWindow):
         )
         text = "\n".join(lines)
         self._append_log(text)
-        self.workspace_value_label.setText(
-            f"{Path(path).name} ({'OK' if result.ok else 'issues found'})"
-        )
+        self._workspace_full_text = f"{Path(path).name} ({'OK' if result.ok else 'issues found'})"
+        self.workspace_value_label.setText(self._workspace_full_text)
         self.workspace_status_label.setText(f"Workspace: {Path(path).name}")
         self._sync_right_panel()
         box = QMessageBox(self)
@@ -2968,7 +2992,8 @@ class MainWindow(QMainWindow):
         chip/icon), so this makes it visible instead of a silent state
         change the user has no way to notice."""
         self._append_log(f"Agent connected folder: {path}", kind="system")
-        self.workspace_value_label.setText(f"{Path(path).name} (agent-connected)")
+        self._workspace_full_text = f"{Path(path).name} (agent-connected)"
+        self.workspace_value_label.setText(self._workspace_full_text)
         self.workspace_status_label.setText(f"Workspace: {Path(path).name}")
         self._sync_right_panel()
 
@@ -3355,6 +3380,56 @@ class MainWindow(QMainWindow):
         if text.startswith("Kontext tejto konverzacie") and marker in text:
             return text.rsplit(marker, 1)[-1]
         return text
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 -- Qt override
+        super().resizeEvent(event)
+        if hasattr(self, "top_bar"):
+            self._update_topbar_compact()
+
+    def _update_topbar_compact(self) -> None:
+        if not hasattr(self, "top_bar") or not hasattr(self, "model_chip"):
+            return
+        width = self.top_bar.width()
+
+        rules = (
+            (self.supervised_agent_btn, width >= 1320),
+            (self.tasks_btn, width >= 1220),
+            (self.errors_btn, width >= 1140),
+            (self.browser_preview_btn, width >= 1060),
+            (self.changes_btn, width >= 980),
+            (self.history_btn, width >= 1040),
+            (self.topbar_status_widget, width >= 980),
+            (self.health_chip, width >= 760),
+            (self.workspace_chip, width >= 860),
+            (self.unload_model_btn, width >= 1500),
+            (self.keep_chip, width >= 1180),
+            (self.thinking_chip, width >= 1180),
+        )
+        for widget, visible in rules:
+            if widget.isVisible() != visible:
+                widget.setVisible(visible)
+
+        icon_only_actions = width < 1180
+        for button, label in self._topbar_action_labels.items():
+            button.setText("" if icon_only_actions else label)
+            button.setMinimumWidth(28 if icon_only_actions else 0)
+            button.setMaximumWidth(32 if icon_only_actions else 16777215)
+
+        compact_model = width < 1120
+        self.model_chip.setMinimumWidth(118 if compact_model else 210)
+        self.model_chip.setMaximumWidth(180 if compact_model else 300)
+        self.model_combo.setMinimumWidth(54 if compact_model else 112)
+        self.model_combo.setMinimumContentsLength(6 if compact_model else 18)
+        self.model_caption.setVisible(not compact_model)
+
+        compact_left = width < 1120
+        self.health_label.setText(self._health_full_text.replace("Health: ", "") if compact_left else self._health_full_text)
+        self.workspace_value_label.setText("Workspace" if compact_left else self._workspace_full_text)
+        self.health_chip.setMinimumWidth(62 if compact_left else 0)
+        self.health_chip.setMaximumWidth(96 if compact_left else 16777215)
+        self.workspace_chip.setMinimumWidth(104 if compact_left else 0)
+        self.workspace_chip.setMaximumWidth(132 if compact_left else 16777215)
+        self.top_bar.updateGeometry()
 
     def _restore_window_geometry(self) -> None:
         geometry = self._settings.value("window_geometry")
