@@ -2,9 +2,10 @@
 
 Notable fixes and changes, newest first.
 
-## 2026-08-01 — Sandbox image now has requests/beautifulsoup4/yt-dlp/ffmpeg
+## 2026-08-01 — Sandbox image now has requests/beautifulsoup4/yt-dlp/ffmpeg/file/7z/exiftool + self-install fallback
 
-- The project-module-engineer subagent's own playbook assumes `requests.Session()`, `yt-dlp`, and `ffmpeg` are available, but none of them were actually in the base agent-server image -- every real task hit `ModuleNotFoundError: No module named 'requests'` on its first HTTP call. Verified directly against the freshly built image that all four are now present. Only affects new conversations (new sandbox containers) -- any already-running conversation is still on the old image until it's restarted.
+- The project-module-engineer subagent's own playbook assumes several tools are available, but none of them were actually in the base agent-server image -- every real task hit `ModuleNotFoundError: No module named 'requests'` on its first HTTP call. Verified directly against the freshly built image that all seven are now present. Only affects new conversations (new sandbox containers) -- any already-running conversation is still on the old image until it's restarted.
+- Also documented a fallback in the subagent's own instructions: if it hits a missing tool this image didn't anticipate, self-install via pip/`sudo apt-get` (verified this sandbox user has working passwordless sudo) instead of treating it as a dead end.
 
 ## 2026-08-01 — Detect and recover from silent conversation hangs (empty LLM response)
 
