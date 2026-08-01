@@ -370,7 +370,7 @@ class MainWindow(QMainWindow):
         self._auto_nudge_in_flight = False
         self._stuck_prompt_shown_for_run = False
         self._host_path_correction_sent_for_run = False
-        self._silence_recovery_sent_for_run = False
+        self._silence_recovery_count_for_run = 0
         # Set by _interrupt() (the Stop button): interrupt() only cancels
         # the in-flight LLM call, it doesn't tell the agent WHY -- confirmed
         # live 2026-08-01 that a plain follow-up message sent right after
@@ -1955,7 +1955,7 @@ class MainWindow(QMainWindow):
         self._auto_nudge_count_for_run = 0
         self._stuck_prompt_shown_for_run = False
         self._host_path_correction_sent_for_run = False
-        self._silence_recovery_sent_for_run = False
+        self._silence_recovery_count_for_run = 0
         if self._controller.conversation_id is None:
             self._user_interrupted_awaiting_priority = False
             self._priority_enforcement_pending = False
@@ -2607,6 +2607,7 @@ class MainWindow(QMainWindow):
         self._controller.send_message(text)
 
     _SILENCE_TIMEOUT_S = 90
+    _MAX_SILENCE_RECOVERIES_PER_RUN = 3
 
     def _check_conversation_silence(self) -> None:
         """Confirmed live 2026-08-01: an OpenHands SDK response_dispatch
@@ -2618,8 +2619,20 @@ class MainWindow(QMainWindow):
         looks at ActionEvents -- if literally nothing happens, it has
         nothing to compare and never fires) ever notices. Runs on the same
         15s timer as the model-sync check; independent of both of those.
+
+        Capped at _MAX_SILENCE_RECOVERIES_PER_RUN, not a single one-shot --
+        confirmed live 2026-08-01 that a one-shot version left a
+        conversation permanently stuck with no further help after the
+        first nudge didn't get a real response either (LM Studio showed
+        "GENERATING" for 4+ minutes with zero new events -- a genuinely
+        very slow/wedged local generation, not a quick corrective-feedback
+        blip the first nudge is meant for). _last_event_at naturally moves
+        forward once the interrupt/redirect below produce their own
+        InterruptEvent/MessageEvent, so each recovery attempt still needs a
+        fresh _SILENCE_TIMEOUT_S of real silence before the next one fires
+        -- this isn't a tight retry loop.
         """
-        if self._silence_recovery_sent_for_run:
+        if self._silence_recovery_count_for_run >= self._MAX_SILENCE_RECOVERIES_PER_RUN:
             return
         if self._controller is None or self._controller.conversation_id is None:
             return
@@ -2630,7 +2643,7 @@ class MainWindow(QMainWindow):
         elapsed = (datetime.now() - self._last_event_at).total_seconds()
         if elapsed < self._SILENCE_TIMEOUT_S:
             return
-        self._silence_recovery_sent_for_run = True
+        self._silence_recovery_count_for_run += 1
         asyncio.ensure_future(self._handle_silence(elapsed))
 
     async def _handle_silence(self, elapsed_s: float) -> None:
@@ -2642,7 +2655,8 @@ class MainWindow(QMainWindow):
         # look like something had gone wrong.
         self._append_log(
             f"No response from the model for over {int(elapsed_s)}s -- nudging it to "
-            "continue.",
+            f"continue (attempt {self._silence_recovery_count_for_run}/"
+            f"{self._MAX_SILENCE_RECOVERIES_PER_RUN}).",
             kind="system",
         )
         if self._controller is None or self._controller.conversation_id is None:
@@ -2662,6 +2676,20 @@ class MainWindow(QMainWindow):
         # display styling changes.
         self._append_log(text, kind="system")
         self._controller.send_message(text)
+        if self._silence_recovery_count_for_run >= self._MAX_SILENCE_RECOVERIES_PER_RUN:
+            # Last automatic attempt used up -- confirmed live 2026-08-01
+            # this can genuinely happen (LM Studio showed "GENERATING" for
+            # 4+ minutes straight with zero new events). Unlike the routine
+            # nudge above, this one needs the user's attention: nothing
+            # further will happen on its own if this attempt doesn't help
+            # either.
+            self._append_log(
+                "Still no response after 3 automatic nudge attempts -- this needs a "
+                "look. Click Stop to interrupt manually, or check if the model server "
+                "itself is stuck.",
+                kind="error",
+            )
+            self._notify_needs_attention()
 
     async def _send_forced_priority_followup(self) -> None:
         """One-shot enforcement for when the priority-message wording alone
