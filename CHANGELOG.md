@@ -2,6 +2,10 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-08-01 — Sandbox image bumped to agent-server 1.40.0-python
+
+- Base image and the app-server's own openhands-sdk/openhands-tools/openhands-agent-server pins bumped 1.37.1 -> 1.40.0 (a coordinated release, all three moved together; confirmed matching sandbox image tag exists upstream). litellm bumped 1.84.1 -> 1.94.1 to satisfy the new SDK's litellm>=1.93.0 requirement, staying below the known litellm/openai incompatibility at >=1.100.0 (BerriAI/litellm#13711). This does NOT pull in the "Agent Canvas" migration -- that's a separate upstream repository restructuring that deleted the REST backend this app depends on; see the openhands-desktop-1.1 experiment for evaluating a direct Agent Server connection instead.
+
 ## 2026-08-01 — Fixed a qasync reentrancy crash storm on "some deletions failed"
 
 - Confirmed live: showing the "some deletions failed" warning dialog from inside `run_async`'s own success callback -- still on that coroutine's Task -- tripped qasync's reentrancy guard the moment the modal's nested Qt event loop tried to pump a pending timer callback (health checks, model polling), throwing `RuntimeError: Cannot enter into task ... while another task ... is being executed` repeatedly. `run_async`'s success/error callbacks now run via `QTimer.singleShot(0, ...)`, after the Task has actually finished. Also: deleting an already-gone conversation (404) now counts as success, not a failure to report -- that was the actual cause of the spurious "1 failed" that triggered this in the first place.
