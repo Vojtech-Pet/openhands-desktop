@@ -2,6 +2,10 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-08-01 — Silence-recovery notice is now informational, not an error
+
+- Confirmed live: the silence detector correctly unstuck a real hang on its own within seconds -- a routine self-recovery, not something to act on. It was styled red like a real error every time, making normal automatic recovery look like something had gone wrong. Now a plain, softer system note; also dropped the forced window-raise since this doesn't need immediate attention.
+
 ## 2026-08-01 — Fixed subagent's browser tool name (would have crashed on launch)
 
 - The project-module-engineer subagent's frontmatter listed `browser` as a tool, but the SDK's actual registered name (confirmed directly in `openhands.sdk.subagent.registry`/`openhands.tools.browser_use.definition`) is `browser_tool_set` -- `browser` isn't registered at all, so launching this subagent would have raised `ValueError: Tool 'browser' not registered` the first time anything actually tried to spawn it (not caught earlier since the tool list only gets validated at spawn time, not when just listed in `launch_subagent`'s description). Fixed and verified end-to-end: actually launched the subagent live and it confirmed real browser tool access (navigate/click/type/etc., not just no error).
