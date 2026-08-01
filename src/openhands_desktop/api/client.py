@@ -443,6 +443,14 @@ class AppServerClient:
 
     async def delete_conversation(self, conversation_id: str) -> None:
         resp = await self._client.delete(f"/api/v1/app-conversations/{conversation_id}")
+        if resp.status_code == 404:
+            # Already gone (deleted by a previous action, or its sandbox
+            # was cleaned up separately) -- confirmed live 2026-08-01 this
+            # surfaced as a spurious "1 failed" in a bulk delete for a
+            # conversation that was already fully gone server-side. The
+            # goal state (conversation absent) is already achieved, so
+            # this is success, not a failure to report or retry.
+            return
         resp.raise_for_status()
 
     async def get_git_changes(self, conversation_id: str, path: str) -> list[dict]:

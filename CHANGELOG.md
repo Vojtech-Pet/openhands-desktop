@@ -2,6 +2,10 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-08-01 — Fixed a qasync reentrancy crash storm on "some deletions failed"
+
+- Confirmed live: showing the "some deletions failed" warning dialog from inside `run_async`'s own success callback -- still on that coroutine's Task -- tripped qasync's reentrancy guard the moment the modal's nested Qt event loop tried to pump a pending timer callback (health checks, model polling), throwing `RuntimeError: Cannot enter into task ... while another task ... is being executed` repeatedly. `run_async`'s success/error callbacks now run via `QTimer.singleShot(0, ...)`, after the Task has actually finished. Also: deleting an already-gone conversation (404) now counts as success, not a failure to report -- that was the actual cause of the spurious "1 failed" that triggered this in the first place.
+
 ## 2026-08-01 — Auto-scroll no longer yanks the view down mid-read
 
 - Reverted the unconditional "always scroll to bottom" from earlier today: scrolling up even slightly to read an earlier message got the view snapped back to the bottom the instant the next message landed, cutting the read off. Now only auto-follows while already at (or very near) the bottom -- scrolling up to read is respected, and the existing "jump to latest" button covers getting back down when ready.
