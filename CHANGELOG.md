@@ -2,6 +2,10 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-08-01 — Detect and recover from silent conversation hangs (empty LLM response)
+
+- Confirmed live: an OpenHands SDK warning ("LLM response contained no tool call and no content") was followed by total silence forever -- `execution_status` stayed "running" (nothing for the status poll to correct) and the watchdog only ever compares ActionEvents, so with literally nothing happening it never fires. New periodic check: if a conversation shows RUNNING but no event arrived in 90s, interrupt and redirect it, and raise the window -- this could otherwise sit silently stuck for hours with zero visible sign.
+
 ## 2026-08-01 — Correct host-path-vs-sandbox confusion after the first failure, not the third
 
 - A proper fix would validate path scope in the tool's own JSON schema before the call ever reaches the sandbox, but glob/grep/file_editor are stock OpenHands SDK tools, not something this app can patch. Instead, the app now watches every failed glob/grep/file_editor observation client-side: if the error says "not a valid directory" and contains a host-looking path prefix, it queues a targeted correction after the very first occurrence -- faster than relying on the generic 3-strikes repeat detector to eventually catch the same pattern.
