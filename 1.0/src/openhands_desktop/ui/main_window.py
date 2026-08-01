@@ -398,6 +398,12 @@ class MainWindow(QMainWindow):
         # one) -- see _render_event. Single slot mirrors LogView's own
         # single-pending-tool-call assumption (actions are sequential).
         self._pending_terminal_action_ts: datetime | None = None
+        # True while a "task" (launch_subagent) call is in flight -- that
+        # tool blocks until the sub-agent's own run finishes, which can
+        # legitimately take far longer than the silence-detector's normal
+        # timeout with zero events reaching this (the parent) conversation
+        # in between. See _check_conversation_silence.
+        self._pending_task_action = False
         self._recent_user_messages: list[str] = []
         self._is_resuming = False
         self._continuing_from_plan_id: str | None = None
@@ -2638,6 +2644,17 @@ class MainWindow(QMainWindow):
             return
         if self._last_run_state != RunState.RUNNING:
             return
+        if self._pending_task_action:
+            # A "task" (launch_subagent) call is in flight -- it blocks
+            # until the sub-agent's own run completes, and none of that
+            # sub-agent's intermediate steps reach this conversation's event
+            # stream, so long silence here is expected, not a sign anything
+            # is stuck. Confirmed live: interrupting mid-delegation (the
+            # nudge below) tore the delegation down instead of just nudging
+            # an idle model -- exactly the "sometimes it just disconnects"
+            # symptom reported for project-module-engineer. Let it run; the
+            # user can still Stop manually if it's genuinely wedged.
+            return
         if self._last_event_at is None:
             return
         elapsed = (datetime.now() - self._last_event_at).total_seconds()
@@ -3212,8 +3229,12 @@ class MainWindow(QMainWindow):
                 )
                 if event.tool_name == "terminal":
                     self._pending_terminal_action_ts = event.timestamp
+                if event.tool_name == "task":
+                    self._pending_task_action = True
             self._tool_call_count += 1
         elif event.kind == EventKind.OBSERVATION:
+            if event.tool_name == "task":
+                self._pending_task_action = False
             if event.tool_name == "finish":
                 return
             text = (event.text or "").strip()

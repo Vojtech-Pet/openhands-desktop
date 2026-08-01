@@ -400,13 +400,11 @@ class _PresetManagerDialog(QDialog):
 
 
 class ChatInputEdit(QPlainTextEdit):
-    """Multi-line input: Ctrl+Enter sends, Escape requests a stop, plain
-    Enter inserts a newline (so multi-line tasks are still easy to type)."""
+    """Multi-line input: Ctrl+Enter sends and plain Enter adds a newline."""
 
-    def __init__(self, on_send, on_stop, on_focus_change=None, parent: QWidget | None = None) -> None:
+    def __init__(self, on_send, on_focus_change=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._on_send = on_send
-        self._on_stop = on_stop
         self._on_focus_change = on_focus_change
         self.setPlaceholderText("What would you like the agent to do? (Ctrl+Enter to send)")
         self.setMinimumHeight(46)
@@ -442,7 +440,10 @@ class ChatInputEdit(QPlainTextEdit):
             self._on_send()
             return
         if event.key() == Qt.Key.Key_Escape:
-            self._on_stop()
+            # Escape is commonly used to dismiss menus and focus. Pausing a
+            # running agent here made accidental pauses look spontaneous.
+            self.clearFocus()
+            event.accept()
             return
         super().keyPressEvent(event)
 
@@ -535,6 +536,12 @@ class MainWindow(QMainWindow):
         # one) -- see _render_event. Single slot mirrors LogView's own
         # single-pending-tool-call assumption (actions are sequential).
         self._pending_terminal_action_ts: datetime | None = None
+        # True while a "task" (launch_subagent) call is in flight -- that
+        # tool blocks until the sub-agent's own run finishes, which can
+        # legitimately take far longer than the silence-detector's normal
+        # timeout with zero events reaching this (the parent) conversation
+        # in between. See _check_conversation_silence.
+        self._pending_task_action = False
         self._recent_user_messages: list[str] = []
         self._is_resuming = False
         self._continuing_from_plan_id: str | None = None
@@ -907,7 +914,7 @@ class MainWindow(QMainWindow):
         input_line.addWidget(self.attach_btn, 0, Qt.AlignmentFlag.AlignTop)
 
         self.input = ChatInputEdit(
-            on_send=self._send, on_stop=self._pause_agent, on_focus_change=self._on_composer_focus_change
+            on_send=self._send, on_focus_change=self._on_composer_focus_change
         )
         self.input.setObjectName("ComposerInput")
         input_line.addWidget(self.input, 1)
@@ -992,7 +999,8 @@ class MainWindow(QMainWindow):
         self.stop_btn.setObjectName("StopButton")
         self.stop_btn.setIcon(icon("stop", 15))
         self.stop_btn.setFixedSize(32, 28)
-        self.stop_btn.setToolTip("Click to pause (Esc). Hold for 5 seconds to stop immediately.")
+        self.stop_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.stop_btn.setToolTip("Click to pause. Hold for 5 seconds to stop immediately.")
         self.stop_btn.pause_requested.connect(self._pause_agent)
         self.stop_btn.stop_requested.connect(self._interrupt)
         composer_tools_row.addWidget(self.stop_btn)
@@ -2660,9 +2668,17 @@ class MainWindow(QMainWindow):
         self._recent_user_messages = self._recent_user_messages[-5:]
 
     def _pause_agent(self) -> None:
+        import traceback
+
+        print("\n=== _pause_agent CALLED ===", flush=True)
+        traceback.print_stack()
+
         if self._controller is not None:
             self._controller.pause()
-            self._append_log("Pause requested. The current model response may finish first.", kind="system")
+            self._append_log(
+                "Pause requested. The current model response may finish first.",
+                kind="system",
+            )
 
     def _interrupt(self) -> None:
         if self._controller is not None:
@@ -3007,7 +3023,7 @@ class MainWindow(QMainWindow):
         self._append_log(text, kind="system")
         self._controller.send_message(text)
 
-    _SILENCE_TIMEOUT_S = 90
+    _SILENCE_TIMEOUT_S = 250
     _MAX_SILENCE_RECOVERIES_PER_RUN = 3
 
     def _check_conversation_silence(self) -> None:
@@ -3038,6 +3054,17 @@ class MainWindow(QMainWindow):
         if self._controller is None or self._controller.conversation_id is None:
             return
         if self._last_run_state != RunState.RUNNING:
+            return
+        if self._pending_task_action:
+            # A "task" (launch_subagent) call is in flight -- it blocks
+            # until the sub-agent's own run completes, and none of that
+            # sub-agent's intermediate steps reach this conversation's event
+            # stream, so long silence here is expected, not a sign anything
+            # is stuck. Confirmed live: interrupting mid-delegation (the
+            # nudge below) tore the delegation down instead of just nudging
+            # an idle model -- exactly the "sometimes it just disconnects"
+            # symptom reported for project-module-engineer. Let it run; the
+            # user can still Stop manually if it's genuinely wedged.
             return
         if self._last_event_at is None:
             return
@@ -3639,8 +3666,12 @@ class MainWindow(QMainWindow):
                 )
                 if event.tool_name == "terminal":
                     self._pending_terminal_action_ts = event.timestamp
+                if event.tool_name == "task":
+                    self._pending_task_action = True
             self._tool_call_count += 1
         elif event.kind == EventKind.OBSERVATION:
+            if event.tool_name == "task":
+                self._pending_task_action = False
             if event.tool_name == "finish":
                 return
             text = (event.text or "").strip()
