@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -48,9 +49,17 @@ class WelcomeWidget(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(SPACE_MD, SPACE_MD, SPACE_MD, SPACE_MD)
 
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        outer.addWidget(scroll)
+
         panel = QFrame()
         panel.setObjectName("HeroPanel")
-        outer.addWidget(panel)
+        panel.setMinimumHeight(560)
+        scroll.setWidget(panel)
 
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(SPACE_LG, SPACE_LG, SPACE_LG, SPACE_LG)
@@ -79,11 +88,15 @@ class WelcomeWidget(QWidget):
 
         layout.addSpacing(SPACE_LG)
 
-        cards_row = QHBoxLayout()
+        cards_container = QWidget()
+        cards_container.setMinimumHeight(170)
+        cards_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        cards_row = QHBoxLayout(cards_container)
+        cards_row.setContentsMargins(0, 0, 0, 0)
         cards_row.setSpacing(SPACE_MD)
         for icon_name, card_title, body in _CARDS:
             cards_row.addWidget(_build_card(icon_name, card_title, body))
-        layout.addLayout(cards_row)
+        layout.addWidget(cards_container)
 
         layout.addSpacing(SPACE_LG)
         layout.addWidget(_divided_label("Get started"))
@@ -101,7 +114,7 @@ class WelcomeWidget(QWidget):
         suggestions_row.addStretch()
         layout.addLayout(suggestions_row)
 
-        layout.addStretch(2)
+        layout.addStretch(1)
 
 
 def _divided_label(text: str) -> QWidget:
@@ -131,14 +144,7 @@ def _build_card(icon_name: str, title: str, body: str) -> QWidget:
     card = QWidget()
     card.setObjectName("WelcomeCard")
     card.setMinimumWidth(220)
-    # QHBoxLayout doesn't reliably honor heightForWidth for wrapped QLabels
-    # (a known Qt limitation), so the card's natural sizeHint can end up
-    # shorter than the wrapped body text actually needs, clipping the last
-    # line -- worse, how much shorter depends on the actual rendered width,
-    # which varies with window size, so a generous *minimum* height alone
-    # isn't reliable either. Fixed height + a Fixed vertical size policy
-    # stops the layout from trying to compute this at all.
-    card.setFixedHeight(190)
+    card.setFixedHeight(170)
     card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
     card_layout = QVBoxLayout(card)
     card_layout.setContentsMargins(23, 23, 23, 23)

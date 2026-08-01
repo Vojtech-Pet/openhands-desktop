@@ -28,6 +28,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
+    QSplitter,
     QStackedWidget,
     QStyledItemDelegate,
     QStyleOptionViewItem,
@@ -68,7 +70,6 @@ from openhands_desktop.ui.sidebar import Sidebar
 from openhands_desktop.supervised_agent.openhands_supervisor import ConversationWatchdog
 from openhands_desktop.ui.supervised_agent_dialog import SupervisedAgentDialog
 from openhands_desktop.ui.spacing import (
-    COMPOSER_INPUT_HEIGHT,
     SPACE_MD,
     SPACE_SM,
     SPACE_XS,
@@ -287,7 +288,21 @@ class ChatInputEdit(QPlainTextEdit):
         self._on_stop = on_stop
         self._on_focus_change = on_focus_change
         self.setPlaceholderText("What would you like the agent to do? (Ctrl+Enter to send)")
-        self.setFixedHeight(72)
+        self.setMinimumHeight(46)
+        self.setMaximumHeight(170)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
+        self.document().contentsChanged.connect(self._fit_to_content)
+        QTimer.singleShot(0, self._fit_to_content)
+
+    def _fit_to_content(self) -> None:
+        margins = self.contentsMargins()
+        doc_height = int(self.document().size().height())
+        frame = self.frameWidth() * 2
+        padding = margins.top() + margins.bottom() + frame + 10
+        target = max(self.minimumHeight(), min(self.maximumHeight(), doc_height + padding))
+        if self.height() != target:
+            self.setFixedHeight(target)
+            self.updateGeometry()
 
     def focusInEvent(self, event) -> None:  # noqa: N802 -- Qt override
         if self._on_focus_change:
@@ -325,6 +340,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("OpenHands Desktop")
         self.resize(1100, 720)
+        self.setMinimumSize(860, 560)
         self.setStyleSheet(DARK_QSS)
 
         self._client = client
@@ -427,6 +443,8 @@ class MainWindow(QMainWindow):
         self._llm_server_state = "unreachable"
         _open_windows.append(self)
 
+        self._restore_window_geometry()
+
         central = QWidget()
         self.setCentralWidget(central)
         root_layout = QHBoxLayout(central)
@@ -438,22 +456,32 @@ class MainWindow(QMainWindow):
         self.icon_rail.settings_requested.connect(self._open_settings)
         root_layout.addWidget(self.icon_rail)
 
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter.setObjectName("MainSplitter")
+        self.main_splitter.setChildrenCollapsible(False)
+        root_layout.addWidget(self.main_splitter, 1)
+
         self.sidebar = Sidebar()
         self.sidebar.new_conversation_requested.connect(self._start_fresh_conversation)
         self.sidebar.conversation_selected.connect(self._resume_conversation)
         self.sidebar.conversation_delete_requested.connect(self._confirm_delete_conversation)
         self.sidebar.settings_requested.connect(self._open_settings)
-        root_layout.addWidget(self.sidebar)
+        self.main_splitter.addWidget(self.sidebar)
 
         main_area = QWidget()
+        main_area.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         main_layout = QVBoxLayout(main_area)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
-        root_layout.addWidget(main_area, 1)
+        self.main_splitter.addWidget(main_area)
 
         self.right_panel = RightPanel()
         self.right_panel.setVisible(False)
-        root_layout.addWidget(self.right_panel)
+        self.main_splitter.addWidget(self.right_panel)
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 1)
+        self.main_splitter.setStretchFactor(2, 0)
+        self._restore_splitter_state()
 
         # --- top bar ---
         top_bar = QWidget()
@@ -638,9 +666,11 @@ class MainWindow(QMainWindow):
 
         # --- stacked content: welcome vs. live chat log ---
         self.stack = QStackedWidget()
+        self.stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.welcome = WelcomeWidget()
         self.welcome.suggestion_clicked.connect(self._on_suggestion_clicked)
         self.log = LogView()
+        self.log.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.log.retry_requested.connect(self._retry_last_message)
         self.stack.addWidget(self.welcome)
         self.stack.addWidget(self.log)
@@ -654,6 +684,7 @@ class MainWindow(QMainWindow):
         # previous two-column layout (composer frame + a separate Send/Stop
         # button stack beside it).
         input_row = QWidget()
+        input_row.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         input_row_layout = QVBoxLayout(input_row)
         input_row_layout.setContentsMargins(SPACE_MD, SPACE_XS, SPACE_MD, SPACE_SM)
         input_row_layout.setSpacing(0)
@@ -661,6 +692,7 @@ class MainWindow(QMainWindow):
         self.composer_frame = QFrame()
         composer_frame = self.composer_frame
         composer_frame.setObjectName("ComposerFrame")
+        composer_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         composer_layout = QVBoxLayout(composer_frame)
         composer_layout.setContentsMargins(SPACE_SM, SPACE_XS, SPACE_SM, SPACE_XS)
         composer_layout.setSpacing(SPACE_XS)
@@ -678,7 +710,6 @@ class MainWindow(QMainWindow):
             on_send=self._send, on_stop=self._interrupt, on_focus_change=self._on_composer_focus_change
         )
         self.input.setObjectName("ComposerInput")
-        self.input.setFixedHeight(COMPOSER_INPUT_HEIGHT - 40)
         input_line.addWidget(self.input, 1)
         composer_layout.addLayout(input_line)
 
@@ -3306,7 +3337,29 @@ class MainWindow(QMainWindow):
             return text.rsplit(marker, 1)[-1]
         return text
 
+    def _restore_window_geometry(self) -> None:
+        geometry = self._settings.value("window_geometry")
+        if isinstance(geometry, bytes):
+            self.restoreGeometry(geometry)
+        elif hasattr(geometry, "data"):
+            self.restoreGeometry(geometry)
+
+    def _restore_splitter_state(self) -> None:
+        state = self._settings.value("main_splitter_state")
+        restored = False
+        if isinstance(state, bytes):
+            restored = self.main_splitter.restoreState(state)
+        elif hasattr(state, "data"):
+            restored = self.main_splitter.restoreState(state)
+        if not restored:
+            self.main_splitter.setSizes([300, 800, 280])
+
+    def _save_window_layout(self) -> None:
+        self._settings.setValue("window_geometry", self.saveGeometry())
+        self._settings.setValue("main_splitter_state", self.main_splitter.saveState())
+
     def closeEvent(self, event) -> None:  # noqa: N802 -- Qt override
+        self._save_window_layout()
         if self._shutdown_complete:
             super().closeEvent(event)
             return

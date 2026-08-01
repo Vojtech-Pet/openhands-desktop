@@ -116,6 +116,13 @@ QWidget {{
     background-color: {BG_SURFACE_1};
     border-left: 1px solid {BORDER};
 }}
+#MainSplitter::handle {{
+    background-color: {BORDER};
+    width: 1px;
+}}
+#MainSplitter::handle:hover {{
+    background-color: {BORDER_HOVER};
+}}
 #DetailCard {{
     background-color: {BG_SURFACE_2};
     border: 1px solid {BORDER};
@@ -158,7 +165,7 @@ QWidget {{
 
 #WelcomeCard {{
     background-color: {BG_SURFACE_2};
-    border: 1px solid {BORDER};
+    border: none;
     border-radius: {RADIUS_LG}px;
 }}
 

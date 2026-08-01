@@ -10,7 +10,7 @@ diff/Terminal/Browser state already exist as separate header buttons
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 from openhands_desktop.ui.icons import icon
 from openhands_desktop.ui.palette import COLOR_DANGER, COLOR_SUCCESS, TEXT_MUTED, TEXT_PRIMARY
@@ -36,7 +36,9 @@ class RightPanel(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("RightPanel")
-        self.setFixedWidth(280)
+        self.setMinimumWidth(240)
+        self.setMaximumWidth(360)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(SPACE_MD, SPACE_MD, SPACE_MD, SPACE_MD)
         layout.setSpacing(SPACE_MD)
