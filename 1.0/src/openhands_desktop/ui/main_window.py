@@ -1084,7 +1084,10 @@ class MainWindow(QMainWindow):
             "Please call mempalace_checkpoint now to save a diary entry (and any relevant "
             "drawer items) summarizing this session, in AAAK format."
         )
-        self._append_log(instruction, kind="user")
+        # kind="system", not "user": sent by the app (a toolbar button), not
+        # typed by the person -- same reasoning as the other auto-generated
+        # nudge/correction messages below.
+        self._append_log(instruction, kind="system")
         self._controller.send_message(instruction)
 
     def _insert_attachment_reference(self) -> None:
@@ -2517,7 +2520,7 @@ class MainWindow(QMainWindow):
                 "agent looked stuck, interrupting and redirecting]",
                 kind="system",
             )
-            self._append_log(self._NUDGE_TEXT, kind="user")
+            self._append_log(self._NUDGE_TEXT, kind="system")
             self._controller.send_message(self._NUDGE_TEXT)
         finally:
             self._auto_nudge_in_flight = False
@@ -2582,7 +2585,7 @@ class MainWindow(QMainWindow):
             "workspace_connect_folder on that exact host path, then "
             "workspace_list_folder/workspace_read_file to browse it instead."
         )
-        self._append_log(text, kind="user")
+        self._append_log(text, kind="system")
         self._controller.send_message(text)
 
     _SILENCE_TIMEOUT_S = 90
@@ -2633,7 +2636,13 @@ class MainWindow(QMainWindow):
             "text). Please try again: call a tool to make progress, or if you're "
             "genuinely stuck, call ask_user_question with concrete options."
         )
-        self._append_log(text, kind="user")
+        # kind="system", not "user": sent by the app, not typed by the
+        # person -- displaying it under a "You" bubble misrepresented who
+        # actually said it (confirmed live, screenshot showed it rendered
+        # exactly like a real user chat message). The text still goes to
+        # the agent unchanged via send_message below; only the local
+        # display styling changes.
+        self._append_log(text, kind="system")
         self._controller.send_message(text)
 
     async def _handle_stuck(self, reason: str) -> None:
@@ -2664,7 +2673,7 @@ class MainWindow(QMainWindow):
             "here, specific to this task -- let the user pick the direction instead "
             "of guessing again."
         )
-        self._append_log(text, kind="user")
+        self._append_log(text, kind="system")
         self._controller.send_message(text)
         self._stuck_prompt_shown_for_run = False
 
