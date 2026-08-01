@@ -4,10 +4,17 @@
 live end-to-end. Continue-as-Code and git-provider integrations still
 incomplete/degraded.**
 
+**Requires `openhands-agent-server`/`openhands-sdk`/`openhands-tools` >=
+1.40.0.** Verified live against exactly 1.40.0 on 2026-08-01 -- see
+`sandbox-image/Dockerfile`'s base image tag, which must stay in step with
+whatever version this client is actually tested against. An older
+agent-server may be missing endpoints this client calls (see the full
+list in the README).
+
 Upstream OpenHands's `origin/main` recently underwent an "Agent Canvas
 migration" that deleted `openhands/app_server` entirely -- the REST backend
-`openhands-desktop` (v1.0, see the `master` branch / `v1.0` tag) talks to.
-That backend is not coming back; app_server is gone from upstream for good.
+the [1.0](../1.0) version talks to. That backend is not coming back;
+app_server is gone from upstream for good.
 
 The replacement is `openhands-agent-server` (already the same package that
 runs inside every sandbox container today) -- but running as **one
