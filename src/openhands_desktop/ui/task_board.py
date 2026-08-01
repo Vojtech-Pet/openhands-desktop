@@ -102,7 +102,7 @@ async def _stop_container(container_name: str) -> None:
     await asyncio.wait_for(proc.wait(), timeout=10.0)
 
 
-def _status_row(conversation: AppConversation, on_delete) -> QWidget:
+def _status_row(conversation: AppConversation, on_delete, on_stop_container) -> QWidget:
     row = QWidget()
     row.setObjectName("TaskRow")
     color = _STATUS_COLOR.get(conversation.execution_status, TEXT_MUTED)
@@ -134,16 +134,29 @@ def _status_row(conversation: AppConversation, on_delete) -> QWidget:
     more_btn.setFixedSize(20, 20)
     more_btn.setToolTip("Task actions")
     more_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-    more_btn.clicked.connect(lambda: _show_task_menu(more_btn, conversation.id, on_delete))
+    more_btn.clicked.connect(
+        lambda: _show_task_menu(more_btn, conversation.id, conversation.sandbox_id, on_delete, on_stop_container)
+    )
     layout.addWidget(more_btn)
 
     return row
 
 
-def _show_task_menu(anchor: QWidget, conversation_id: str, on_delete) -> None:
+def _show_task_menu(
+    anchor: QWidget, conversation_id: str, sandbox_id: str | None, on_delete, on_stop_container
+) -> None:
     menu = QMenu(anchor)
     delete_action = menu.addAction("Delete conversation")
     delete_action.triggered.connect(lambda: on_delete(conversation_id))
+    if sandbox_id:
+        # Goes straight through docker stop/rm, bypassing the app-server API
+        # entirely -- confirmed live 2026-08-01 that "Delete conversation"
+        # can silently fail to actually remove the container when the
+        # app-server's own sandbox bookkeeping has desynced from Docker
+        # (sandbox_status "MISSING" while `docker ps` still shows it "Up"),
+        # so this is the fallback that works even then.
+        stop_action = menu.addAction("Stop container (docker)")
+        stop_action.triggered.connect(lambda: on_stop_container(sandbox_id))
     menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
 
 
@@ -267,7 +280,7 @@ class TaskBoardDialog(QDialog):
         for conversation in conversations:
             item = QListWidgetItem()
             item.setData(1000, conversation.id)
-            row = _status_row(conversation, self._confirm_delete_task)
+            row = _status_row(conversation, self._confirm_delete_task, self._confirm_stop_container)
             item.setSizeHint(row.sizeHint())
             self._list.addItem(item)
             self._list.setItemWidget(item, row)
@@ -285,6 +298,24 @@ class TaskBoardDialog(QDialog):
             run_async(
                 self,
                 _stop_container(container_name),
+                lambda _result: self._reload(),
+                error_title="Failed to stop container",
+            )
+
+    def _confirm_stop_container(self, sandbox_id: str) -> None:
+        reply = QMessageBox.question(
+            self,
+            "Stop container",
+            f'Stop and remove the sandbox container "{sandbox_id}" directly via Docker? '
+            "This bypasses the app-server API, so use it when Delete conversation doesn't "
+            "actually free the container (e.g. after an app-server desync).",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            run_async(
+                self,
+                _stop_container(sandbox_id),
                 lambda _result: self._reload(),
                 error_title="Failed to stop container",
             )

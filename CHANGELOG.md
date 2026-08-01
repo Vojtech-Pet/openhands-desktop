@@ -2,13 +2,29 @@
 
 Notable fixes and changes, newest first.
 
+## 2026-08-01 — Auto-scroll no longer yanks the view down mid-read
+
+- Reverted the unconditional "always scroll to bottom" from earlier today: scrolling up even slightly to read an earlier message got the view snapped back to the bottom the instant the next message landed, cutting the read off. Now only auto-follows while already at (or very near) the bottom -- scrolling up to read is respected, and the existing "jump to latest" button covers getting back down when ready.
+
+## 2026-08-01 — Duration timer now freezes on Stop/Paused, not just on finish
+
+- Clicking Stop (interrupt) left the "Working…" duration counting up exactly like an active run, with no way to tell from the UI whether it actually stopped. The timer now also freezes on RunState.PAUSED, alongside the existing terminal states, matching the already-present "Paused" status pill.
+
+## 2026-08-01 — Stop, then message: now tells the agent to drop the old task
+
+- Clicking Stop (interrupt) only cancels the in-flight LLM call -- it carries no explanation of why. Confirmed live that a plain follow-up message sent right after Stop was not treated as taking priority; the agent just picked the interrupted task back up. The next message sent after a Stop click is now wrapped with an explicit "you were just interrupted, don't resume the previous task, act on this instead" instruction.
+
+## 2026-08-01 — Mission Control: stop a task's container directly via Docker
+
+- Added "Stop container (docker)" to every task's action menu (not just already-orphaned ones), calling docker stop/rm directly instead of going through the app-server API. Confirmed live that the API's "Delete conversation" can silently fail to free the container when the app-server's own sandbox bookkeeping has desynced from Docker (sandbox_status "MISSING" while the container is still "Up") -- this is the fallback that works even then.
+
 ## 2026-08-01 — Silence-recovery notice is now informational, not an error
 
 - Confirmed live: the silence detector correctly unstuck a real hang on its own within seconds -- a routine self-recovery, not something to act on. It was styled red like a real error every time, making normal automatic recovery look like something had gone wrong. Now a plain, softer system note; also dropped the forced window-raise since this doesn't need immediate attention.
 
-## 2026-08-01 — Fixed subagent's browser tool name (would have crashed on launch)
+## 2026-08-01 — Fixed a private local subagent's browser tool name (would have crashed on launch)
 
-- The project-module-engineer subagent's frontmatter listed `browser` as a tool, but the SDK's actual registered name (confirmed directly in `openhands.sdk.subagent.registry`/`openhands.tools.browser_use.definition`) is `browser_tool_set` -- `browser` isn't registered at all, so launching this subagent would have raised `ValueError: Tool 'browser' not registered` the first time anything actually tried to spawn it (not caught earlier since the tool list only gets validated at spawn time, not when just listed in `launch_subagent`'s description). Fixed and verified end-to-end: actually launched the subagent live and it confirmed real browser tool access (navigate/click/type/etc., not just no error).
+- A local subagent's frontmatter listed `browser` as a tool, but the SDK's actual registered name (confirmed directly in `openhands.sdk.subagent.registry`/`openhands.tools.browser_use.definition`) is `browser_tool_set` -- `browser` isn't registered at all, so launching this subagent would have raised `ValueError: Tool 'browser' not registered` the first time anything actually tried to spawn it (not caught earlier since the tool list only gets validated at spawn time, not when just listed in `launch_subagent`'s description). Fixed and verified end-to-end: actually launched the subagent live and it confirmed real browser tool access (navigate/click/type/etc., not just no error).
 
 ## 2026-08-01 — Sandbox image now also has httpx/aiohttp (async HTTP)
 
@@ -16,7 +32,7 @@ Notable fixes and changes, newest first.
 
 ## 2026-08-01 — Sandbox image now has requests/beautifulsoup4/yt-dlp/ffmpeg/file/7z/exiftool + self-install fallback
 
-- The project-module-engineer subagent's own playbook assumes several tools are available, but none of them were actually in the base agent-server image -- every real task hit `ModuleNotFoundError: No module named 'requests'` on its first HTTP call. Verified directly against the freshly built image that all seven are now present. Only affects new conversations (new sandbox containers) -- any already-running conversation is still on the old image until it's restarted.
+- A local subagent's own playbook assumes several tools are available, but none of them were actually in the base agent-server image -- every real task hit `ModuleNotFoundError: No module named 'requests'` on its first HTTP call. Verified directly against the freshly built image that all seven are now present. Only affects new conversations (new sandbox containers) -- any already-running conversation is still on the old image until it's restarted.
 - Also documented a fallback in the subagent's own instructions: if it hits a missing tool this image didn't anticipate, self-install via pip/`sudo apt-get` (verified this sandbox user has working passwordless sudo) instead of treating it as a dead end.
 
 ## 2026-08-01 — Detect and recover from silent conversation hangs (empty LLM response)

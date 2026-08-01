@@ -371,6 +371,14 @@ class MainWindow(QMainWindow):
         self._stuck_prompt_shown_for_run = False
         self._host_path_correction_sent_for_run = False
         self._silence_recovery_sent_for_run = False
+        # Set by _interrupt() (the Stop button): interrupt() only cancels
+        # the in-flight LLM call, it doesn't tell the agent WHY -- confirmed
+        # live 2026-08-01 that a plain follow-up message sent right after
+        # Stop was not treated as taking priority over the just-interrupted
+        # task, the agent just picked the old task back up. The next _send()
+        # after a Stop click wraps the user's text with an explicit
+        # priority instruction instead of sending it verbatim.
+        self._user_interrupted_awaiting_priority = False
         self._last_run_state: RunState | None = None
         self._last_event_at: datetime | None = None
         self._state_generation = 0
@@ -1940,6 +1948,7 @@ class MainWindow(QMainWindow):
         self._host_path_correction_sent_for_run = False
         self._silence_recovery_sent_for_run = False
         if self._controller.conversation_id is None:
+            self._user_interrupted_awaiting_priority = False
             self._remember_user_message(text)
             profile_name = self.model_combo.currentData()
             model = self._selected_model()
@@ -1968,7 +1977,19 @@ class MainWindow(QMainWindow):
             )
         else:
             self._remember_user_message(text)
-            if self._last_run_state == RunState.RUNNING:
+            outgoing_text = text
+            if self._user_interrupted_awaiting_priority:
+                # Consumed once: interrupt() only cancels the in-flight LLM
+                # call, it carries no explanation, so the very next message
+                # is the only place left to tell the agent this supersedes
+                # whatever it was doing instead of being just another queued
+                # note to get back to once the old task is done.
+                self._user_interrupted_awaiting_priority = False
+                outgoing_text = (
+                    "PRIORITY -- you were just interrupted. Do not resume or continue "
+                    "the previous task. Read and act on this message first:\n\n" + text
+                )
+            elif self._last_run_state == RunState.RUNNING:
                 # send_message only appends to the conversation's event
                 # history -- it does NOT interrupt whatever LLM call is
                 # already in flight, and whether the agent even acts on it
@@ -1986,7 +2007,7 @@ class MainWindow(QMainWindow):
                     "If you need it to react right now, click Stop first.",
                     kind="system",
                 )
-            self._controller.send_message(text)
+            self._controller.send_message(outgoing_text)
 
     async def _start_new_after_model_ready(
         self, *, text: str, profile_name: str | None, model: str | None, agent_type: str | None
@@ -2095,10 +2116,10 @@ class MainWindow(QMainWindow):
         "You do NOT have launch_subagent/sub-agent delegation in this mode "
         "(confirmed live -- it is not in your tool list) -- do not search "
         "for it or try to work around its absence. If the task involves "
-        "the local local project project's download modules, write into "
-        "PLAN.md that the Code agent must delegate this work to the "
-        "project-module-engineer subagent via launch_subagent -- "
-        "that is Code's job to do, not yours."
+        "a private local project that has its own dedicated subagent "
+        "(see the project-module-engineer entry, if configured), write "
+        "into PLAN.md that the Code agent must delegate this work to it "
+        "via launch_subagent -- that is Code's job to do, not yours."
     )
 
     _CODE_MODE_NOTE = (
@@ -2115,18 +2136,15 @@ class MainWindow(QMainWindow):
         "Before calling finish: confirm the actual change exists on disk "
         "(read the file back, or run the test/build) -- do not call finish "
         "based on believing a previous step succeeded without checking.\n\n"
-        "Mandatory delegation for the local local project project: if the "
-        "task involves adding, fixing, or investigating anything under that "
-        "project's download modules (a new video site, a broken module, a "
-        "page hiding its real media URL), ALWAYS call launch_subagent with "
-        "agent type \"project-module-engineer\" as your first "
-        "action for that task -- do not investigate or implement it "
-        "yourself first. That subagent has the full site-specific "
-        "extraction playbook (known site patterns, crypto/obfuscation "
-        "handling, the module contract); doing the work directly instead "
-        "of delegating skips all of that. This overrides the general "
-        "\"use subagents only when the task genuinely benefits\" guidance "
-        "for this specific category of task."
+        "Mandatory delegation for a private local project: if a dedicated "
+        "\"project-module-engineer\" subagent is configured (check your "
+        "available agent types), ALWAYS call launch_subagent with it as "
+        "your first action for any task that falls within its own "
+        "description -- do not investigate or implement that work "
+        "yourself first. It has a full domain-specific playbook that "
+        "doing the work directly instead of delegating would skip. This "
+        "overrides the general \"use subagents only when the task "
+        "genuinely benefits\" guidance for this specific category of task."
     )
 
     # Only appended when this Code conversation was actually started via
@@ -2216,6 +2234,7 @@ class MainWindow(QMainWindow):
     def _interrupt(self) -> None:
         if self._controller is not None:
             self._controller.interrupt()
+            self._user_interrupted_awaiting_priority = True
 
     def _on_conversation_ready(self, conversation_id: str) -> None:
         self.changes_btn.setEnabled(True)
@@ -2313,10 +2332,15 @@ class MainWindow(QMainWindow):
         self._last_run_state = state
         if state == RunState.ERROR:
             self._notify_needs_attention()
-        if state in self._TERMINAL_STATES:
+        if state in self._TERMINAL_STATES or state == RunState.PAUSED:
             # Freeze instead of continuing to tick through idle time after
             # the agent is actually done -- "how long this ran", not "how
-            # long since it started including time spent waiting".
+            # long since it started including time spent waiting". PAUSED
+            # is included even though it isn't terminal: confirmed live
+            # 2026-08-01 that clicking Stop (interrupt) leaves the timer
+            # ticking exactly like a still-running task, with nothing in
+            # the UI to tell the two apart -- the whole point of clicking
+            # Stop is to be sure it actually stopped.
             self._update_duration_label()
             self._duration_frozen = True
         elif self._duration_frozen and state == RunState.RUNNING:

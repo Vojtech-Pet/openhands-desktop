@@ -806,6 +806,18 @@ class LogView(QScrollArea):
         # handler is what actually shows it (this only fills content in).
 
     def _scroll_to_bottom(self) -> None:
+        # Only follow the log automatically while the user is already at (or
+        # very near) the bottom -- confirmed live 2026-08-01 that
+        # unconditional auto-scroll (a prior explicit request) yanked the
+        # view back down mid-read the moment a new message landed, the
+        # instant the user scrolled up even slightly to read something
+        # earlier. Captured *before* the deferred layout-settle below, since
+        # bar.maximum() is about to change once the new content lands and
+        # would otherwise always read as "not at bottom" by then.
+        bar = self.verticalScrollBar()
+        was_at_bottom = bar.value() >= bar.maximum() - self._AT_BOTTOM_TOLERANCE_PX
+        if not was_at_bottom:
+            return
         # bar.maximum() right after insertWidget() still reflects the layout
         # from *before* this row -- Qt hasn't recomputed geometry yet, so
         # this landed short of the real bottom whenever a card was tall
