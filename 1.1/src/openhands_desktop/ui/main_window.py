@@ -548,6 +548,7 @@ class MainWindow(QMainWindow):
         self._conversation_starting = False
         self._model_switching = False
         self._health_check_in_flight = False
+        self._health_check_started_at: datetime | None = None
         self._model_check_in_flight = False
         self._shutdown_complete = False
         self._shutdown_started = False
@@ -2160,15 +2161,35 @@ class MainWindow(QMainWindow):
 
     # --- health / workspace ----------------------------------------------------
 
+    # Confirmed live 2026-08-02: a health-check tick's probe_llm_server_state()
+    # call silently stopped completing (no exception, no log line -- just
+    # never returned) after running fine for over an hour. Every subsequent
+    # 15s timer tick then no-op'd on the in-flight guard forever, leaving
+    # the connection_status_label stuck on "Disconnected" even though
+    # app_server, LM Studio, and the running conversation were all actually
+    # fine underneath -- only a manual click (which goes through a
+    # different call path) unstuck it. This treats an in-flight check
+    # older than this as abandoned and lets a fresh one start instead of
+    # waiting on it forever.
+    _HEALTH_CHECK_STALE_S = 30
+
     def _check_health(self) -> None:
         if self._health_check_in_flight:
-            return
+            started_at = self._health_check_started_at
+            if (
+                started_at is not None
+                and (datetime.now() - started_at).total_seconds() < self._HEALTH_CHECK_STALE_S
+            ):
+                return
+            # Stale -- the previous check never finished. Don't wait on it.
+            self._health_check_in_flight = False
         asyncio.ensure_future(self._check_health_async())
 
     async def _check_health_async(self) -> None:
         if self._health_check_in_flight:
             return
         self._health_check_in_flight = True
+        self._health_check_started_at = datetime.now()
         ok = False
         llm_state = "unreachable"
         try:
@@ -2178,6 +2199,7 @@ class MainWindow(QMainWindow):
             self._on_error(f"Health check failed: {exc}")
         finally:
             self._health_check_in_flight = False
+            self._health_check_started_at = None
         self._health_full_text = f"Health: {'OK' if ok else 'unreachable'}"
         self.health_label.setText(self._health_full_text)
         self.health_label.setObjectName("HealthOk" if ok else "HealthBad")
